@@ -57,6 +57,7 @@ def main(
 
 
 # Root-level commands
+from hyperresearch.cli.archive import archive_run as _archive_run
 from hyperresearch.cli.dedup import dedup as _dedup
 from hyperresearch.cli.fetch import fetch as _fetch
 from hyperresearch.cli.import_cmd import import_vault as _import
@@ -71,6 +72,7 @@ from hyperresearch.cli.research import research as _research
 from hyperresearch.cli.search import search as _search
 from hyperresearch.cli.serve import serve as _serve
 from hyperresearch.cli.tag import tag_list as _tags
+from hyperresearch.cli.vault_tag import vault_tag as _vault_tag
 from hyperresearch.cli.watch import watch as _watch
 
 app.command("install")(_install)
@@ -91,6 +93,8 @@ app.command("research")(_research)
 app.command("tags")(_tags)
 app.command("show", hidden=True)(_show)
 app.command("dedup")(_dedup)
+app.command("archive-run")(_archive_run)
+app.command("vault-tag")(_vault_tag)
 app.command("import")(_import)
 app.command("repair")(_repair)
 app.command("watch")(_watch)
