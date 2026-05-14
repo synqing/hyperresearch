@@ -88,7 +88,7 @@ Before you invoke any step skill, do this:
    - Extract wrapper requirements separately: required save path, citation format, terminal-section shape, wrapper contract. These are binding but NOT part of the query.
    - If `research/wrapper_contract.json` exists, read it.
 
-2. **Generate a vault tag** (short slug from the canonical query, e.g., `efield-dft-sac`).
+2. **Mint a unique vault tag.** First produce a short topical slug from the canonical query — 3–5 lowercase hyphen-separated words, e.g. `efield-dft-sac`. Then call `hyperresearch vault-tag <slug> --json` and parse the `vault_tag` field from the response. The CLI appends a random 6-hex-char suffix that's verified unique against every prior run's `research/query-*.md` and `research/notes/final_report_*.md` in this vault. The result — e.g. `efield-dft-sac-a3f9b7` — is the canonical vault_tag for the rest of the pipeline. The suffix guarantees no overwrite of a prior run's final report or query file, even if the user re-runs the exact same query or two different queries slug-collide.
 
 3. **Persist the query file.** Write the verbatim canonical query to `research/query-<vault_tag>.md`:
    ```markdown
