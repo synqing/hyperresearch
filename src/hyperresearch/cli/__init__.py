@@ -57,6 +57,7 @@ def main(
 
 
 # Root-level commands
+from hyperresearch.cli.archive import archive_run as _archive_run
 from hyperresearch.cli.dedup import dedup as _dedup
 from hyperresearch.cli.fetch import fetch as _fetch
 from hyperresearch.cli.import_cmd import import_vault as _import
@@ -91,6 +92,7 @@ app.command("research")(_research)
 app.command("tags")(_tags)
 app.command("show", hidden=True)(_show)
 app.command("dedup")(_dedup)
+app.command("archive-run")(_archive_run)
 app.command("import")(_import)
 app.command("repair")(_repair)
 app.command("watch")(_watch)

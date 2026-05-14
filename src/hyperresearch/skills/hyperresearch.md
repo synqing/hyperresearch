@@ -80,6 +80,8 @@ Before you invoke any step skill, do this:
 
    If either command fails because the binary isn't on PATH, tell the user to run `pip install hyperresearch` first. If both files already exist, both commands no-op cheaply — safe to run unconditionally.
 
+0.5. **Archive any prior run's artifacts.** Run `hyperresearch archive-run --json`. If a previous `/hyperresearch` session left a scaffold, loci.json, comparisons.md, critic-findings, patch-log, polish-log, prompt-decomposition, or any `research/temp/*` scratch, this moves the whole set into `research/runs/archive-<prev-tag>-<UTC-timestamp>/` so the new run starts from a clean slate without losing the prior run's audit trail. Final reports (`research/notes/final_report_<tag>.md`) and canonical query files (`research/query-<tag>.md`) are already namespaced and stay in place. The command no-ops cheaply on a fresh vault — safe to run unconditionally. **Caveat:** this protects sequential runs only. Two `/hyperresearch` invocations that overlap in time still race on the new files they both write; if you need true parallel runs, namespace per-run artifacts under `research/runs/<vault_tag>/` instead.
+
 1. **Resolve the canonical research query.** Order of precedence:
    - If `research/prompt.txt` exists (legacy harness / wrapped run), read it. Its contents are the canonical research query. GOSPEL.
    - Otherwise, use the user's verbatim prompt as the canonical research query.
