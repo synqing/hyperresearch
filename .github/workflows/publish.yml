@@ -21,8 +21,14 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install build tools
-        run: pip install build
+      - name: Install test and build tools
+        run: pip install -e ".[dev]" build
+
+      - name: Lint
+        run: ruff check src/ tests/
+
+      - name: Test
+        run: pytest tests/ -v
 
       - name: Build package
         run: python -m build

@@ -34,14 +34,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+crawl4ai = ["Crawl4AI>=0.4"]
 mcp = ["mcp>=1.6"]
 exa = ["exa-py>=2.0.0"]
-all = ["hyperresearch[mcp,exa]"]
+watch = ["watchdog>=4.0"]
+all = ["hyperresearch[crawl4ai,mcp,exa,watch]"]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
     "ruff>=0.3",
     "mypy>=1.8",
+    "exa-py>=2.0.0",
+    "mcp>=1.6",
+    "types-PyYAML>=6.0.12",
+    "watchdog>=4.0",
 ]
 
 [project.scripts]

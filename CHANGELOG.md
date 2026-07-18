@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Release readiness and deployability
+
+- **Version metadata is consistent again.** `hyperresearch.__version__` now tracks the version declared in `pyproject.toml`, fixing the state where the built wheel reported `0.8.6` while `hyperresearch --version` reported `0.8.5`.
+- **CI installs the dependencies used by the tests.** The `dev` extra now includes `exa-py`, so the Exa provider tests pass under the same `pip install -e ".[dev]"` command CI runs. Without it, `main` fails 10 tests in `tests/test_web/test_exa_provider.py` with `ModuleNotFoundError: No module named 'exa_py'`.
+- **Optional extras match CLI guidance.** Declared the `crawl4ai` and `watch` extras the CLI already directs users to install. `pip install hyperresearch[watch]` previously resolved to no extra and installed no `watchdog`, so `hpr watch` stayed broken while telling the user to run the command that had just failed.
+- **Publish workflow now gates on lint and tests before building.** Tagged releases still publish via trusted PyPI publishing, but the publish job now fails before upload if ruff or pytest fails.
+- **Packaging regression tests added.** The test suite now checks that runtime version metadata tracks `pyproject.toml` and that dev/install extras cover the tested optional provider surface.
+
 ## [0.8.6] - 2026-05-14
 
 ### Run-to-run safety: no more silent overwrites between /hyperresearch sessions
