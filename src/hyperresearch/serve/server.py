@@ -508,8 +508,13 @@ class HyperresearchHandler(BaseHTTPRequestHandler):
             self._send(200, body, "Search")
             return
 
-        from hyperresearch.search.fts import search_fts
-        results = search_fts(self.db, query, limit=50)
+        from hyperresearch.search.fts import SearchQueryError, search_fts
+        try:
+            results = search_fts(self.db, query, limit=50)
+        except SearchQueryError as e:
+            body += f"<p>{html_mod.escape(str(e))}</p>"
+            self._send(200, body, "Search")
+            return
         body += f"<p>{len(results)} results</p>\n<div class='results'>\n"
         for r in results:
             snippet = r["snippet"].replace(">>>", "<mark>").replace("<<<", "</mark>")

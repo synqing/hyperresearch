@@ -1,7 +1,11 @@
 """Tests for full-text search."""
 
+import sqlite3
+
+import pytest
+
 from hyperresearch.search.filters import SearchFilters
-from hyperresearch.search.fts import preprocess_query, search_fts
+from hyperresearch.search.fts import SearchQueryError, preprocess_query, search_fts
 
 
 def test_preprocess_simple_query():
@@ -56,3 +60,27 @@ def test_filter_by_path_glob(seeded_vault):
     filters = SearchFilters(path_glob="notes/python/*")
     results = search_fts(seeded_vault.db, "python", filters=filters)
     assert all("python" in r["path"] for r in results)
+
+
+# --- Degenerate queries must not masquerade as "no results" -------------------
+# Previously every sqlite3.OperationalError was swallowed and [] returned, so an
+# invalid query and a corrupt index both looked identical to an empty topic.
+
+
+@pytest.mark.parametrize("query", ["", "   ", "***", "()", "^^^", "{}"])
+def test_degenerate_query_raises_rather_than_returning_empty(seeded_vault, query):
+    """A query with no searchable terms is an error, not zero results."""
+    with pytest.raises(SearchQueryError):
+        search_fts(seeded_vault.db, query)
+
+
+def test_no_results_is_still_empty_not_an_error(seeded_vault):
+    """A valid query that matches nothing must stay a normal empty result."""
+    assert search_fts(seeded_vault.db, "zzzznonexistenttermzzzz") == []
+
+
+def test_broken_index_surfaces_instead_of_returning_empty(seeded_vault):
+    """A missing FTS table must raise, not look like a topic with no notes."""
+    seeded_vault.db.execute("DROP TABLE IF EXISTS notes_fts")
+    with pytest.raises(sqlite3.OperationalError, match="notes_fts"):
+        search_fts(seeded_vault.db, "python")

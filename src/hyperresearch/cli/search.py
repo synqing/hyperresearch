@@ -36,7 +36,7 @@ def search(
     from hyperresearch.core.vault import Vault, VaultError
     from hyperresearch.models.note import ContentType, Tier
     from hyperresearch.search.filters import SearchFilters
-    from hyperresearch.search.fts import search_fts
+    from hyperresearch.search.fts import SearchQueryError, search_fts
 
     # Validate enums up-front
     if tier is not None:
@@ -97,7 +97,16 @@ def search(
         "penalize_deprecated": vault.config.search_penalize_deprecated,
         "penalize_stale": vault.config.search_penalize_stale,
     }
-    results = search_fts(vault.db, query, filters=filters, limit=limit, offset=offset, ranking=ranking)
+    try:
+        results = search_fts(
+            vault.db, query, filters=filters, limit=limit, offset=offset, ranking=ranking
+        )
+    except SearchQueryError as e:
+        if json_output:
+            output(error(str(e), "BAD_QUERY"), json_mode=True)
+        else:
+            console.print(f"[red]Error:[/] {e}")
+        raise typer.Exit(2) from e
 
     # Auto-include body in JSON mode (agents almost always need it)
     want_body = include_body or (json_output and not no_body)
