@@ -6,6 +6,32 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
+# Whitespace that is legitimate in extracted text.
+_TEXT_WHITESPACE = "\t\n\r\f\v"
+
+
+def is_binary_garbage_char(c: str) -> bool:
+    """True if `c` indicates binary or mis-decoded content rather than real text.
+
+    Deliberately NOT `ord(c) > 127`. Treating all non-ASCII as binary rejects
+    valid CJK, Arabic, Cyrillic, Greek, Hebrew, Thai, and accented Latin text —
+    i.e. most of the non-English web. Only genuine markers of binary data or a
+    failed decode count here.
+    """
+    o = ord(c)
+    if o < 0x20 and c not in _TEXT_WHITESPACE:
+        return True  # C0 control characters
+    if c == "�":
+        return True  # replacement character — decoding already failed
+    return 0x80 <= o <= 0x9F  # C1 control characters
+
+
+def binary_garbage_ratio(text: str) -> float:
+    """Fraction of `text` that looks like binary or mis-decoded content."""
+    if not text:
+        return 0.0
+    return sum(1 for c in text if is_binary_garbage_char(c)) / len(text)
+
 
 @dataclass
 class WebResult:
@@ -102,8 +128,7 @@ class WebResult:
         if any(m in sample for m in pdf_binary_signals):
             return "Binary PDF garbage in content"
 
-        non_printable = sum(1 for c in sample if ord(c) > 127 or c in '\x00\x01\x02\x03\x04\x05')
-        if non_printable > len(sample) * 0.15:
+        if binary_garbage_ratio(sample) > 0.05:
             return "High ratio of binary/non-printable content"
 
         # Cookie consent / boilerplate pages (short with mostly nav/cookie text)

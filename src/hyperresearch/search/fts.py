@@ -8,6 +8,14 @@ import sqlite3
 from hyperresearch.search.filters import SearchFilters
 
 
+class SearchQueryError(ValueError):
+    """The search query could not be turned into a valid FTS5 query.
+
+    Raised instead of returning an empty result set, so a malformed query is
+    never indistinguishable from a topic with no matching notes.
+    """
+
+
 def _split_alphanum(word: str) -> list[str]:
     """Split words where letters meet digits: 'mamba3' -> ['mamba', '3'],
     'gpt4o' -> ['gpt', '4', 'o'], 'llama3.1' -> ['llama', '3', '1'].
@@ -61,8 +69,21 @@ def search_fts(
     include_index: bool = False,
     ranking: dict | None = None,
 ) -> list[dict]:
-    """Execute a full-text search against the notes_fts table."""
+    """Execute a full-text search against the notes_fts table.
+
+    Raises:
+        SearchQueryError: the query is empty or has no searchable terms.
+        sqlite3.OperationalError: the FTS index is missing or unreadable. This is
+            deliberately not swallowed — a broken index must not look like a
+            topic with no results.
+    """
     fts_query = preprocess_query(query)
+
+    if not fts_query.strip():
+        raise SearchQueryError(
+            f"Search query {query!r} contains no searchable terms. "
+            "Provide at least one word or quoted phrase."
+        )
 
     filter_clause = ""
     filter_params: list = []
@@ -101,8 +122,13 @@ def search_fts(
 
     try:
         rows = conn.execute(sql, params).fetchall()
-    except sqlite3.OperationalError:
-        return []
+    except sqlite3.OperationalError as exc:
+        msg = str(exc)
+        if "syntax error" in msg or "malformed MATCH" in msg or "unterminated" in msg:
+            raise SearchQueryError(f"Invalid search query {query!r}: {msg}") from exc
+        # Missing table, corrupt index, locked database — surface it. Returning []
+        # here previously made a broken vault indistinguishable from an empty one.
+        raise
 
     results = []
     for row in rows:

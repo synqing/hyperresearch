@@ -43,7 +43,7 @@ def search_notes(query: str, tag: str = "", status: str = "", parent: str = "", 
     vault = _get_vault()
     vault.auto_sync()
     from hyperresearch.search.filters import SearchFilters
-    from hyperresearch.search.fts import search_fts
+    from hyperresearch.search.fts import SearchQueryError, search_fts
     tags = [t.strip() for t in tag.split(",") if t.strip()] or None
     filters = SearchFilters(tags=tags, status=status or None, parent=parent or None)
     ranking = {
@@ -55,7 +55,10 @@ def search_notes(query: str, tag: str = "", status: str = "", parent: str = "", 
         "penalize_deprecated": vault.config.search_penalize_deprecated,
         "penalize_stale": vault.config.search_penalize_stale,
     }
-    results = search_fts(vault.db, query, filters=filters, limit=limit, ranking=ranking)
+    try:
+        results = search_fts(vault.db, query, filters=filters, limit=limit, ranking=ranking)
+    except SearchQueryError as e:
+        return f"Invalid search query: {e}"
     for r in results:
         row = vault.db.execute("SELECT body FROM note_content WHERE note_id = ?", (r["id"],)).fetchone()
         r["body"] = row["body"] if row else ""
