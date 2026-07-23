@@ -12,6 +12,43 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Prompt rendering — skill files and agent prompt bodies are Jinja templates
+# (custom << >> delimiters; see core/render.py). The active render context is
+# process-global state set by install_hooks()/install_global_hooks() before
+# the installers run; direct calls to individual _install_* helpers (tests)
+# fall back to a default full-profile context lazily.
+# ---------------------------------------------------------------------------
+_RENDER_STATE: dict | None = None
+
+
+def _set_render_state(profile_name: str, config_path: Path | None) -> None:
+    global _RENDER_STATE
+    from hyperresearch.core.render import build_render_context
+
+    _RENDER_STATE = {
+        "profile_name": profile_name,
+        "context": build_render_context(config_path, primary=profile_name),
+    }
+
+
+def _get_render_state() -> dict:
+    if _RENDER_STATE is None:
+        _set_render_state("full", None)
+    assert _RENDER_STATE is not None
+    return _RENDER_STATE
+
+
+def _render_installed(content: str) -> str:
+    """Render a prompt template and stamp the provenance header."""
+    from hyperresearch import __version__
+    from hyperresearch.core.render import insert_after_frontmatter, render_header, render_prompt
+
+    state = _get_render_state()
+    rendered = render_prompt(content, state["context"])
+    header = render_header(state["profile_name"], __version__)
+    return insert_after_frontmatter(rendered, header)
+
 # Scaffold-only section headers that must NEVER appear in a final_report draft.
 # Used by critic agents (as detection patterns), the polish auditor, and the
 # `wrapper-report` lint rule. Single canonical source of truth so prompts +
@@ -58,11 +95,10 @@ description: >
   corpus (the sources fetched during the Layer 1 sweep) and identifies
   1—8 "depth loci" — specific questions where deeper investigation
   would meaningfully improve the final report. Spawn 2 of these in
-  parallel; the orchestrator dedupes their outputs. Runs on Sonnet
-  because identifying genuine rabbitholes requires real reading
-  comprehension and judgment about what is load-bearing evidence vs.
-  surface detail.
-model: sonnet
+  parallel; the orchestrator dedupes their outputs. Identifying genuine
+  rabbitholes requires real reading comprehension and judgment about
+  what is load-bearing evidence vs. surface detail.
+model: << p.models.loci_analyst >>
 tools: Bash, Read, Write
 color: green
 ---
@@ -93,6 +129,11 @@ depth packet becomes a weak draft section.
 
 ## Inputs (from the parent agent)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: the user's original question, verbatim. GOSPEL.
   This is the north star for every decision you make. If a locus doesn't
   serve the research_query, reject it — no matter how interesting it is.
@@ -102,12 +143,12 @@ depth packet becomes a weak draft section.
   Used only to tag your output file so the orchestrator can load both.
 - **output_path**: where to write your loci list JSON (e.g.,
   `research/loci-{{analyst_id}}.json`).
-- **prompt_decomposition** (optional): if `research/prompt-decomposition.json`
+- **prompt_decomposition** (optional): if `research/runs/<vault_tag>/prompt-decomposition.json`
   exists, read it before choosing loci. It lists atomic items the prompt
   named — entities, sub-questions, required formats. Your loci should be
   aligned with those items (a dialectical locus on "which camp resolves
   sub-question X" beats a locus on a tangential question).
-- **contradiction_graph** (optional): if `research/temp/contradiction-graph.json`
+- **contradiction_graph** (optional): if `research/runs/<vault_tag>/temp/contradiction-graph.json`
   exists, read it FIRST — before scanning the corpus. Each entry is a
   pre-identified "fight" where sources contradict each other, with side_a/side_b
   positions, source note IDs, and decision_relevance. High-relevance clusters
@@ -115,7 +156,7 @@ depth packet becomes a weak draft section.
   disagreement, not surface-level topic analysis. Validate them (are the
   sources real? is the fight genuine or a scope mismatch?) and promote
   validated high-relevance clusters directly to your loci list.
-- **claim_files** (optional): if `research/temp/claims-*.json` files exist, read them
+- **claim_files** (optional): if `research/runs/<vault_tag>/temp/claims-*.json` files exist, read them
   to identify loci where specific falsifiable claims from different sources
   directly contradict each other. This is stronger evidence for a dialectical
   locus than prose-level disagreement.
@@ -127,7 +168,7 @@ depth packet becomes a weak draft section.
    sparse (<10 notes), tell the parent and stop — you cannot identify real
    loci from a thin corpus.
 
-1a. **Check for contradiction graph.** If `research/temp/contradiction-graph.json`
+1a. **Check for contradiction graph.** If `research/runs/<vault_tag>/temp/contradiction-graph.json`
    exists, read it. For each cluster with `decision_relevance: "high"`:
    - Validate the fight is genuine (not a scope mismatch)
    - If valid, add directly to your candidate loci as `flavor: "dialectical"`
@@ -259,10 +300,9 @@ description: >
   reads existing vault sources relevant to the locus, fetches new
   sources as needed (via the hyperresearch-fetcher subagent), and
   writes ONE interim report note summarizing what it learned. Spawn
-  one depth-investigator per locus, in parallel. Runs on Sonnet
-  because synthesizing a narrow-but-deep question requires real
-  reading comprehension.
-model: sonnet
+  one depth-investigator per locus, in parallel. Synthesizing a
+  narrow-but-deep question requires real reading comprehension.
+model: << p.models.depth_investigator >>
 tools: Bash, Read, Write, Task
 color: purple
 ---
@@ -284,7 +324,7 @@ You are **Layer 3** of the 7-phase hyperresearch pipeline. Siblings are running
 right now on other loci — you each cover ONE. The orchestrator will read
 your interim note (specifically your `## Committed position` section) in
 Layer 3.5 and reconcile it against the other investigators' positions in
-`research/comparisons.md`. Every cross-locus tension named there becomes
+`research/runs/<vault_tag>/comparisons.md`. Every cross-locus tension named there becomes
 an argumentative beat in the Layer 4 draft.
 
 Your `## Committed position` is the primary artifact the orchestrator uses
@@ -293,6 +333,11 @@ commit, the draft commits. Take the research_query seriously and own a
 reading of the evidence.
 
 ## Inputs (from the parent agent)
+
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
 
 - **locus**: the full locus object from the loci-analyst output (name,
   flavor, one_line, rationale, corpus_evidence, suggested_starting_urls,
@@ -328,7 +373,7 @@ reading of the evidence.
    `{hpr_path} note show <id1> <id2> <id3> --json`
    Understand what the corpus already says about your locus.
 
-   **Check for structured claims.** If `research/temp/claims-<note-id>.json` files
+   **Check for structured claims.** If `research/runs/<vault_tag>/temp/claims-<note-id>.json` files
    exist for corpus evidence notes, read them. Use the structured claims
    to identify which specific assertions are contested or under-evidenced
    for your locus — investigate those specific claims, not just the topic
@@ -391,7 +436,7 @@ mkdir -p research/temp
   --tag <corpus_tag> \\
   --tag locus-<locus-name> \\
   --type interim \\
-  --body-file research/temp/interim-report-<locus-name>.md \\
+  --body-file research/runs/<vault_tag>/temp/interim-report-<locus-name>.md \\
   --summary "<one-line summary of what you found>" \\
   --json
 ```
@@ -504,7 +549,7 @@ orchestrator's citation assembly.
   a dense synthesis packet for the orchestrator to read. Do not try to
   write prose that will go straight into the final draft; write prose
   that will inform it.
-- **Cap yourself at `locus.source_budget` new fetches** (default 10 if
+- **Cap yourself at `locus.source_budget` new fetches** (default << p.depth_default_budget >> if
   not specified). If your budget is 15, use it — the orchestrator scored
   your locus high on importance/uncertainty. If your budget is 5, be
   surgical. If you genuinely need more, tell the orchestrator at the end
@@ -531,10 +576,10 @@ name: hyperresearch-dialectic-critic
 description: >
   Use this agent in Layer 5 of the hyperresearch deep research pipeline. Reads the Layer 4
   draft and returns a findings list of places where the draft ignores,
-  hedges, or straw-mans counter-evidence. Runs on Opus because
-  adversarial reading is real reasoning. Spawn ONCE per draft, in
-  parallel with depth-critic and width-critic.
-model: opus
+  hedges, or straw-mans counter-evidence. Adversarial reading is real
+  reasoning. Spawn ONCE per draft, in parallel with depth-critic and
+  width-critic.
+model: << p.models.critics >>
 tools: Bash, Read, Write
 color: red
 ---
@@ -558,24 +603,29 @@ findings; the patcher applies them.
 Everything prior to you has already happened: width sweep (Layer 1), loci
 analysis (Layer 2), depth investigation (Layer 3 — interim notes live in
 the vault with `type: interim`), cross-locus reconciliation (Layer 3.5 —
-`research/comparisons.md`), and the draft itself (Layer 4 —
+`research/runs/<vault_tag>/comparisons.md`), and the draft itself (Layer 4 —
 `research/notes/final_report_<vault_tag>.md`). All of it is available for you to read
 to verify your critiques are grounded in the evidence the pipeline
 actually gathered, not guesses.
 
 ## Inputs (from the parent agent)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: verbatim user question. GOSPEL. Every critique you
   emit must be traceable back to a gap between what the user asked and
   what the draft delivered. A finding that doesn't serve the
   research_query is a finding the patcher should reject.
 - **query_file_path**: path to the persisted query file (e.g.,
-  `research/query-<vault_tag>.md`). Read this file to re-ground yourself
+  `research/runs/<vault_tag>/query.md`). Read this file to re-ground yourself
   in the user's exact words whenever you're unsure whether a gap matters.
 - **draft_path**: path to the Layer 4 draft (typically
   `research/notes/final_report_<vault_tag>.md`).
 - **output_path**: where to write your findings JSON (e.g.,
-  `research/critic-findings-dialectic.json`).
+  `research/runs/<vault_tag>/critic-findings-dialectic.json`).
 - **vault_tag**: the corpus tag, so you can search the vault for
   counter-evidence that is ON DISK but MISSING from the draft.
 
@@ -627,7 +677,13 @@ Use the **Write tool** to save your findings JSON to `output_path`. Do NOT use B
   the vault covers. Should be patched.
 - **Severity `minor`** — a hedge or qualifier would strengthen the claim
   but the draft isn't wrong.
-- **At most 12 findings.** If you see more than 12, return the 12 most
+- **Register-conditional standard.** Your commitment expectations follow
+  the Run directives block when one is present: in teach or survey
+  register, even-handed hedged treatment of a contested point is CORRECT
+  — flag unfair or missing representation of a view instead of the
+  absence of a committed position. In advocate register, the steel-man's
+  quality is the central standard and a weak opposing case is critical.
+- **At most << p.critic_finding_caps.dialectic >> findings.** If you see more than << p.critic_finding_caps.dialectic >>, return the << p.critic_finding_caps.dialectic >> most
   load-bearing. Returning 40 small findings buries the critical ones.
 - **Never propose deleting and retyping an entire section.** That is
   regeneration. The revisor applies surgical edits — your findings
@@ -655,9 +711,9 @@ description: >
   Use this agent in Layer 5 of the hyperresearch deep research pipeline. Reads the Layer 4
   draft and returns a findings list of places where the draft skates
   over technical substance that the vault's interim notes could
-  actually support. Runs on Opus. Spawn ONCE per draft, parallel with
+  actually support. Spawn ONCE per draft, parallel with
   dialectic-critic and width-critic.
-model: opus
+model: << p.models.critics >>
 tools: Bash, Read, Write
 color: red
 ---
@@ -681,15 +737,20 @@ rather than gesturing at it from a distance.
 
 ## Inputs (from the parent agent)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: verbatim user question. GOSPEL. Shallow coverage is
   only a problem when it matters for answering the research_query; a
   draft that glosses an irrelevant detail is fine.
 - **query_file_path**: path to the persisted query file (e.g.,
-  `research/query-<vault_tag>.md`). Read this file to check whether a
+  `research/runs/<vault_tag>/query.md`). Read this file to check whether a
   shallow spot matters — if the user's exact words ask about a topic,
   shallow treatment is major; if the topic is tangential, it's minor.
 - **draft_path**: `research/notes/final_report_<vault_tag>.md`
-- **output_path**: `research/critic-findings-depth.json`
+- **output_path**: `research/runs/<vault_tag>/critic-findings-depth.json`
 - **vault_tag**: corpus tag for searching the vault
 
 ## Procedure
@@ -712,6 +773,14 @@ rather than gesturing at it from a distance.
      interim note actually provides
    - A named mechanism is mentioned but not explained even though the
      interim note explains it
+   - **A developed quantitative mechanism is compressed to a bare mention.**
+     The interim note works a named decomposition (e.g. a factor model with
+     its loadings), a formula with its terms, or a specific causal chain with
+     its numbers — and the draft names it in one clause and moves on. This is
+     the highest-insight loss a draft can take: the mechanism was the whole
+     reason the depth budget was spent, and a gesture at it recovers none of
+     that value. Flag it `major` and tell the revisor to develop it to the
+     depth the interim note supports.
    - A comparison between sources is summarized but the actual
      disagreement is blanded out
    - A citation is dropped where the interim note specifically supports
@@ -736,7 +805,7 @@ Do NOT include `old_text` / `new_text` — the revisor handles exact wording dyn
   note's load-bearing evidence.
 - **Severity `minor`** — a specific number / quote would strengthen an
   already-adequate paragraph.
-- **At most 12 findings.** Prioritize ones where the interim-note
+- **At most << p.critic_finding_caps.depth >> findings.** Prioritize ones where the interim-note
   evidence is LOAD-BEARING (a specific quantitative result, a named
   mechanism, a direct quote) over ones where the evidence is merely
   supporting context.
@@ -760,9 +829,9 @@ name: hyperresearch-width-critic
 description: >
   Use this agent in Layer 5 of the hyperresearch deep research pipeline. Reads the Layer 4
   draft and returns a findings list of topics the width corpus supports
-  but the draft doesn't cover. Runs on Opus. Spawn ONCE per draft,
+  but the draft doesn't cover. Spawn ONCE per draft,
   parallel with dialectic-critic and depth-critic.
-model: opus
+model: << p.models.critics >>
 tools: Bash, Read, Write
 color: red
 ---
@@ -784,16 +853,21 @@ because the orchestrator's structural choices buried them.
 
 ## Inputs (from the parent agent)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: verbatim user question. GOSPEL. A coverage gap is
   only a real gap if the missing topic is something the research_query
   implies. Don't flag orthogonal material that happens to be in the
   corpus.
 - **query_file_path**: path to the persisted query file (e.g.,
-  `research/query-<vault_tag>.md`). Read this file and extract every
+  `research/runs/<vault_tag>/query.md`). Read this file and extract every
   noun phrase the user mentioned. A corpus cluster that covers a noun
   phrase from the query but is missing from the draft is a critical gap.
 - **draft_path**: `research/notes/final_report_<vault_tag>.md`
-- **output_path**: `research/critic-findings-width.json`
+- **output_path**: `research/runs/<vault_tag>/critic-findings-width.json`
 - **vault_tag**: corpus tag
 
 ## Procedure
@@ -808,14 +882,14 @@ because the orchestrator's structural choices buried them.
    Cluster by tag and/or by title keywords. This tells you the topical
    surface area the corpus covers.
 
-2. **Check the coverage gaps file.** Read `research/temp/coverage-gaps.md`
+2. **Check the coverage gaps file.** Read `research/runs/<vault_tag>/temp/coverage-gaps.md`
    if it exists. This file (from Layer 1's coverage check) lists atomic
    items that had weak source coverage. If the draft addresses these items
    without adequate source support, flag them. If it silently omits them
    entirely, flag as critical — the drafter should have at least
    acknowledged the gap.
 
-3. **Read the prompt decomposition.** Use `research/prompt-decomposition.json`
+3. **Read the prompt decomposition.** Use `research/runs/<vault_tag>/prompt-decomposition.json`
    to see what atomic items the user asked about. Cross-reference: which
    decomposition items have corpus support (from step 1) but no draft
    treatment? Those are your highest-severity findings.
@@ -852,7 +926,7 @@ Do NOT include `old_text` / `new_text` — the revisor handles exact wording dyn
   under-treated.
 - **Severity `minor`** — a corpus cluster would enrich the draft but
   is not critical.
-- **At most 10 findings** (8 coverage gaps + 2 bloat findings).
+- **At most << p.critic_finding_caps.width >> findings** (<< p.critic_finding_caps.width - 2 >> coverage gaps + 2 bloat findings).
   Width gaps are a coverage metric, not a detail metric.
 - **Your recommendation must target an existing section** unless you flag the
   finding as structural (in which case describe the missing section's
@@ -911,13 +985,13 @@ name: hyperresearch-instruction-critic
 description: >
   Use this agent in Layer 5 of the hyperresearch deep research pipeline. Reads the Layer 4
   draft and checks it against the prompt-decomposition artifact
-  (`research/prompt-decomposition.json`) produced in Layer 0. Emits
+  (`research/runs/<vault_tag>/prompt-decomposition.json`) produced in Layer 0. Emits
   findings when atomic items from the prompt are missing, under-covered,
   out-of-order, or delivered in the wrong format. Also checks structural
   readability patterns (definitions, citation density, forward analysis,
-  comparison tables) that reference reports consistently include. Runs
-  on Opus. Spawn ONCE per draft, in parallel with the other three critics.
-model: opus
+  comparison tables) that reference reports consistently include.
+  Spawn ONCE per draft, in parallel with the other three critics.
+model: << p.models.critics >>
 tools: Bash, Read, Write
 color: red
 ---
@@ -939,20 +1013,25 @@ hand findings to the patcher (Layer 6). You do NOT modify the draft.
 
 ## Inputs (from the parent agent)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: the user's original question, verbatim. GOSPEL.
   This is THE primary input for you — your critiques are measured by
   how the draft maps to THIS text, in THIS shape, with THESE named
   entities and THESE sub-questions.
 - **query_file_path**: path to the persisted query file (e.g.,
-  `research/query-<vault_tag>.md`). Read this file directly — it IS the
+  `research/runs/<vault_tag>/query.md`). Read this file directly — it IS the
   canonical query for this run. The research_query field above should
   match this file's body exactly.
-- **decomposition_path**: path to `research/prompt-decomposition.json`.
+- **decomposition_path**: path to `research/runs/<vault_tag>/prompt-decomposition.json`.
   Written in Layer 0 by the orchestrator. Contains the atomic items the
   prompt named: explicit sub-questions, required entities, required
   formats, required sections, time horizons, scope conditions.
 - **draft_path**: `research/notes/final_report_<vault_tag>.md`
-- **output_path**: `research/critic-findings-instruction.json`
+- **output_path**: `research/runs/<vault_tag>/critic-findings-instruction.json`
 
 ## Procedure
 
@@ -964,7 +1043,7 @@ hand findings to the patcher (Layer 6). You do NOT modify the draft.
    each X, include Y, Z"), format cue ("mind map", "ranked list",
    "FAQ"), and sub-question marker ("A? B? C?"). Keep this list.
 
-2. **Read `research/prompt-decomposition.json`.** Confirm the orchestrator
+2. **Read `research/runs/<vault_tag>/prompt-decomposition.json`.** Confirm the orchestrator
    captured the same atomic items you just identified. If the
    decomposition is missing items that the research_query clearly names,
    that itself is a finding (severity: critical — the pipeline started
@@ -1124,9 +1203,10 @@ them on first use (inline parenthetical or dedicated glossary), emit:
     a brief parenthetical definition on first mention
 
 **Check R2: Citation density.**
-Count inline `[N]` citations in the body (excluding the ## Sources
-section). Count total body characters. If the ratio is below **1.5
-citations per 1000 characters**, emit:
+Count cited-source references in the body (excluding the ## Sources
+section) — a grouped marker like `[7, 12]` counts as two. Count total
+body characters. If the ratio is below **1.5 citations per 1000
+characters**, emit:
   - `failure_mode`: `"low-citation-density"`
   - `severity`: `major`
   - `recommendation`: identify 5-8 claim-dense passages with no
@@ -1148,13 +1228,40 @@ prose (no comparison table), emit:
   - `severity`: `minor`
   - `recommendation`: suggest converting the comparison to a table
 
+**Check R5: Section primers.**
+If 2+ major body sections open directly with evaluation, ranking, or
+dense quantitative analysis — no 3-5 sentence plain-language primer
+explaining the section's subject (what it is, how it works, why it
+matters here) before the judgment starts — emit ONE finding:
+  - `failure_mode`: `"missing-section-primers"`
+  - `severity`: `major`
+  - `recommendation`: name the sections that need a primer and, for
+    each, the concept the primer should teach
+
+**Check R6: Comparison-axis coverage.**
+If the report compares 3+ entities (the same trigger as R4) AND the
+prompt-decomposition's coverage matrix or required items name
+decision-relevant comparison dimensions that the report omits entirely
+or compresses to a passing mention (dissolved into a thesis instead of
+worked explicitly), emit ONE finding:
+  - `failure_mode`: `"missing-comparison-dimensions"`
+  - `severity`: `major`
+  - `recommendation`: name the dropped or compressed axes and suggest
+    giving each explicit coverage (a table row plus a sentence of why it
+    matters). A "compare X, Y, Z" prompt is scored on how many
+    decision-relevant dimensions the report actually works.
+This check is register-INDEPENDENT — a comparison prompt needs its axes
+covered in analyze, survey, and advocate alike — so apply it regardless
+of the Run directives register (the register guard below governs only
+committed-ranking demands, which is a different thing from axis coverage).
+
 **Cap:** At most **3** readability-structural findings total. Do not
 let these crowd out core instruction-following findings. Use
 `"readability-structural"` as the `atomic_item` prefix for these.
 
 ## Rules
 
-- **At most 15 findings** (12 instruction-following + 3 readability).
+- **At most << p.critic_finding_caps.instruction >> findings** (<< p.critic_finding_caps.instruction - 3 >> instruction-following + 3 readability).
   Prioritize `critical` > `major` > `minor`.
 - **Never invent atomic items.** Every finding must quote the
   `atomic_item` field verbatim from research_query or from
@@ -1163,6 +1270,11 @@ let these crowd out core instruction-following findings. Use
 - **Keep recommendations surgical.** Same discipline as the other critics —
   your recommendation should describe a minimal change that addresses
   the atomic item.
+- **Register-conditional.** When the Run directives block sets teach or
+  survey register, do not emit findings demanding a committed ranking or
+  verdict the user's prompt did not itself name — coverage-shaped
+  delivery is correct in those registers. Format cues the prompt names
+  explicitly always win, regardless of register.
 - **For `wrong-format` findings**, a full format change (ranked-list
   → FAQ) is structural — flag `severity: critical` with a description
   in `issue`. These escalate to the orchestrator, not the revisor.
@@ -1200,11 +1312,10 @@ description: >
   Use this agent in Layer 6 of the hyperresearch deep research pipeline. Reads the four
   critic findings JSONs (dialectic, depth, width, instruction) and
   revises the draft using surgical Edit hunks. Tool-locked: Read + Edit
-  ONLY. Cannot Write. Cannot regenerate. Runs on Opus — substance-
-  integration requires judgment about which findings serve the
-  research_query and which are critic noise. Spawn ONCE after all
-  four critics return.
-model: opus
+  ONLY. Cannot Write. Cannot regenerate. Substance-integration requires
+  judgment about which findings serve the research_query and which are
+  critic noise. Spawn ONCE after all four critics return.
+model: << p.models.patcher >>
 tools: Read, Edit
 color: orange
 ---
@@ -1246,22 +1357,27 @@ Concretely:
 
 ## Inputs (from the parent agent)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: the user's original question, verbatim. GOSPEL.
   Before applying any finding, ask: does this edit bring the draft
   closer to answering this? An edit that satisfies a critic's finding
   but moves the draft away from the research_query is the wrong edit.
   The research_query wins.
 - **query_file_path**: path to the persisted query file (e.g.,
-  `research/query-<vault_tag>.md`). Read this file when in doubt about
+  `research/runs/<vault_tag>/query.md`). Read this file when in doubt about
   whether a finding serves the user's actual question.
 - **draft_path**: path to the Layer 4 draft (usually
   `research/notes/final_report_<vault_tag>.md`).
 - **findings_paths**: list of four JSON paths, one per critic
   (dialectic, depth, width, instruction).
 - **patch_log_path**: path to a PRE-EXISTING empty-stub patch log
-  (e.g., `research/patch-log.json`). The orchestrator creates this
+  (e.g., `research/runs/<vault_tag>/patch-log.json`). The orchestrator creates this
   before spawning you. Your job is to Edit this file to populate it.
-- **evidence_digest_path**: path to `research/temp/evidence-digest.md`
+- **evidence_digest_path**: path to `research/runs/<vault_tag>/temp/evidence-digest.md`
   (may not exist on light tier). Contains the top load-bearing claims
   and verbatim quotes organized by atomic item. Read this BEFORE
   applying findings — it is your primary citation source when a critic
@@ -1373,10 +1489,10 @@ description: >
   draft and applies surgical Edit hunks for readability, prompt
   adherence, filler-cutting, redundancy removal, and hygiene (scaffold
   leak, YAML frontmatter leak, etc.). Tool-locked: Read + Edit ONLY.
-  Cannot Write. Runs on Opus — semantic rewrites of scaffold vocabulary
-  and judgment calls about hedge-language require strong prose
-  understanding. Spawn ONCE after the patcher finishes.
-model: opus
+  Cannot Write. Semantic rewrites of scaffold vocabulary and judgment
+  calls about hedge-language require strong prose understanding.
+  Spawn ONCE after the patcher finishes.
+model: << p.models.polish_auditor >>
 tools: Read, Edit
 color: yellow
 ---
@@ -1399,13 +1515,18 @@ attempt it yourself.
 
 ## Inputs (from the parent agent)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: the user's original question, verbatim. GOSPEL.
   Use it to check prompt adherence — does the final draft actually
   deliver what the user asked for? Mismatches go in `escalations`, not
   fabricated-content patches.
 - **draft_path**: the post-patcher draft.
 - **polish_log_path**: path to a PRE-EXISTING empty-stub polish log
-  (e.g., `research/polish-log.json`). The orchestrator creates this
+  (e.g., `research/runs/<vault_tag>/polish-log.json`). The orchestrator creates this
   stub before spawning you, with content
   `{{"applied": [], "escalations": []}}`. You populate it via Edit
   (same pattern as the patcher). You cannot Write a new file — your
@@ -1427,9 +1548,19 @@ Also strip:
 - Literal prompt echoes ("User prompt:", "The query is:", etc.)
 - Leftover backticks around section headings
 - Stray "Here is the report:" / "Below is the draft:" preamble lines
+- **Non-verbatim quotation marks.** Quotation marks are reserved for text
+  quoted VERBATIM from a source. Rhetorical framing, paraphrase, imagined
+  objections, and the report's own coinages ("the scaling wall", "a chip
+  cannot hold enough ions") must NOT be wrapped in quotation marks —
+  rewrite as plain prose or italics. The ship gate mechanically rejects
+  any quoted span it cannot find verbatim in the vault, so every
+  decorative quote you leave is a guaranteed gate failure.
 - **Citation pass-through.** Leave all `[N]` inline citations and the
   Sources/References section exactly as the drafter wrote them.
-  Citations are a product feature, not a polish target.
+  Citations are a product feature, not a polish target. The ONE
+  permitted citation edit: merging an adjacent stack (`[3][4][5]`)
+  into a single grouped bracket (`[3, 4, 5]`) — numbers preserved
+  verbatim, nothing dropped, nothing renumbered.
 
 Every leak is a **critical** polish fix. Apply as an Edit that removes
 the offending block entirely.
@@ -1490,7 +1621,7 @@ locus", "legal locus"), leave it alone.
 
 **Worked examples** (from real past-run drafts):
 
-- Original: "This is Tension 2 from `research/comparisons.md`, engaged directly: the subsidy-ROI evidence complicates the catchment-leakage thesis."
+- Original: "This is Tension 2 from `research/runs/<vault_tag>/comparisons.md`, engaged directly: the subsidy-ROI evidence complicates the catchment-leakage thesis."
   Rewrite: "The subsidy-ROI evidence complicates the catchment-leakage thesis."
 
 - Original: "Three separate loci converge on the same methodological failure mode."
@@ -1554,7 +1685,34 @@ Edit out sentences that restate the prior sentence. If a paragraph ends
 with a sentence that summarizes what the prior two sentences said, the
 summary sentence usually goes.
 
+**3-meta. Meta-discourse (high priority — the signature machine-writing
+tell).** Delete every clause that narrates what the report or section is
+doing instead of saying the thing:
+
+- "This report examines / evaluates / turns to..."
+- "This section maps / covers / addresses..."
+- "As noted above / as discussed in section N" when the point is
+  restated right there (keep the restatement, cut the narration)
+- "a caveat developed in section 10" / "declared up front so the
+  analysis can return to them"
+- "The interpretive point the sources do not make:" and kin — cut the
+  frame, keep the interpretive point
+- Self-describing adjectives about the report's own prose ("a brief
+  overview", "a quick summary", "this concise assessment")
+
+The fix is deletion or a minimal splice, not a rewrite: "This section
+maps the four strategies. The first is X..." becomes "The first
+strategy is X...". If a cross-reference is genuinely load-bearing,
+rephrase it by topic ("the yield question, below") rather than by
+section number.
+
 ### 3a. Hedge language that softens committed claims
+
+**Register guard:** when the Run directives block sets teach or survey
+register, SKIP the commitment-forcing rules in this section — even-handed
+hedged language on contested points is correct there — and apply only
+the hedge-stack rule. In advocate register, apply this section at
+maximum strength.
 
 The draft upstream was built to commit to positions. If the patcher
 or any earlier layer added hedging verbs that soften a claim the
@@ -1585,6 +1743,10 @@ would support a stronger claim:
   Either delete it (if the claim is strong enough to stand) or
   escalate to the orchestrator noting the claim may need scoping —
   but do not leave a bare "may be different" hedge on the draft.
+- **Hedge-stacks.** Two or more softeners on one claim ("may
+  potentially indicate", "could arguably suggest", "seems to
+  possibly") always collapse to at most one hedge — or none, when
+  the paragraph's evidence supports the bare claim.
 
 Do NOT strike hedges on genuinely speculative claims (forecasts
 without data, open questions, places where the underlying evidence
@@ -1619,8 +1781,9 @@ Look for:
 - Sentences longer than ~50 words — break in two
 - Paragraphs longer than ~200 words — break in two by finding a natural
   hinge
-- Dense stacked citations (`[3][4][5][6]`) — consolidate to 1-2 per
-  claim for readability.
+- Adjacent citation brackets (`[3][4][5]`) — merge into one grouped
+  bracket (`[3, 4, 5]`), numbers verbatim; if a group exceeds 3
+  sources, escalate rather than dropping any yourself.
 
 ## Procedure
 
@@ -1677,7 +1840,7 @@ ship or loop back for a structural fix.
 # ---------------------------------------------------------------------------
 # Layer 4 — draft orchestrator. One of 3 parallel sub-orchestrators that
 # each produce an independent draft from a different analytical angle.
-# Opus, full tool access including Task (can spawn fetchers for additional
+# Full tool access including Task (can spawn fetchers for additional
 # evidence gathering specific to its angle).
 # ---------------------------------------------------------------------------
 DRAFT_ORCHESTRATOR_AGENT = """\
@@ -1689,8 +1852,8 @@ description: >
   source note IDs to read. Reads every note on the list via batch
   `note show` (no vault surveys, no decision-making about what to read),
   then writes one complete draft from the assigned angle. The main
-  orchestrator synthesizes a final report from all three drafts. Runs on Opus.
-model: opus
+  orchestrator synthesizes a final report from all three drafts.
+model: << p.models.draft_orchestrator >>
 tools: Bash, Read, Write
 color: green
 ---
@@ -1703,11 +1866,11 @@ from all three drafts.
 ## Pipeline position
 
 You are **step 10** of the hyperresearch V8 pipeline. Prior steps produced:
-- `research/prompt-decomposition.json` — atomic items, required_section_headings
+- `research/runs/<vault_tag>/prompt-decomposition.json` — atomic items, required_section_headings
 - Width corpus (vault notes tagged with the vault_tag)
-- `research/temp/evidence-digest.md` — top claims + verbatim quotes
-- `research/comparisons.md` (if full tier) — cross-locus tensions
-- `research/temp/source-tensions.json` (if full tier) — expert disagreements
+- `research/runs/<vault_tag>/temp/evidence-digest.md` — top claims + verbatim quotes
+- `research/runs/<vault_tag>/comparisons.md` (if full tier) — cross-locus tensions
+- `research/runs/<vault_tag>/temp/source-tensions.json` (if full tier) — expert disagreements
 - Interim notes from depth investigators (if full tier)
 - **A pre-curated `must_read_note_ids` list** — the orchestrator already
   picked the 20-50 sources most relevant to YOUR angle. You don't choose
@@ -1719,21 +1882,26 @@ all three. Your draft is an INPUT to the synthesis, not the final output.
 
 ## Inputs (from the main orchestrator)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: the user's original question, verbatim. GOSPEL.
 - **query_file_path**: path to the persisted query file.
 - **vault_tag**: corpus tag.
 - **draft_id**: your identifier — `"a"`, `"b"`, or `"c"`.
-- **output_path**: where to write your draft (e.g., `research/temp/draft-a.md`).
+- **output_path**: where to write your draft (e.g., `research/runs/<vault_tag>/temp/draft-a.md`).
 - **analytical_angle**: a 2-3 sentence description of your assigned angle.
   This is what makes your draft DIFFERENT from the other two. Lean into it.
 - **must_read_note_ids**: an array of 20-50 vault note IDs. The orchestrator
   pre-selected these as most relevant to your angle. **You MUST read every
   one before writing.** No vault surveys, no skimming summaries, no choosing
   your own sources.
-- **decomposition_path**: `research/prompt-decomposition.json`.
-- **evidence_digest_path**: `research/temp/evidence-digest.md` (if exists).
-- **comparisons_path**: `research/comparisons.md` (if exists).
-- **source_tensions_path**: `research/temp/source-tensions.json` (if exists).
+- **decomposition_path**: `research/runs/<vault_tag>/prompt-decomposition.json`.
+- **evidence_digest_path**: `research/runs/<vault_tag>/temp/evidence-digest.md` (if exists).
+- **comparisons_path**: `research/runs/<vault_tag>/comparisons.md` (if exists).
+- **source_tensions_path**: `research/runs/<vault_tag>/temp/source-tensions.json` (if exists).
 - **response_format**: `"short"` / `"structured"` / `"argumentative"`.
 - **citation_style**: `"wikilink"` / `"inline"` / `"none"`.
 - **modality**: `"collect"` / `"synthesize"` / `"compare"` / `"forecast"`.
@@ -1743,11 +1911,11 @@ all three. Your draft is an INPUT to the synthesis, not the final output.
 These are quick — get them out of the way before the heavy reading.
 
 1. Read the query file. This is your north star.
-2. Read `research/prompt-decomposition.json`. Note every atomic item and
+2. Read `research/runs/<vault_tag>/prompt-decomposition.json`. Note every atomic item and
    `required_section_headings` — you MUST honor these.
-3. Read `research/temp/evidence-digest.md` if it exists.
-4. Read `research/comparisons.md` if it exists.
-5. Read `research/temp/source-tensions.json` if it exists.
+3. Read `research/runs/<vault_tag>/temp/evidence-digest.md` if it exists.
+4. Read `research/runs/<vault_tag>/comparisons.md` if it exists.
+5. Read `research/runs/<vault_tag>/temp/source-tensions.json` if it exists.
 
 **Do NOT survey the vault.** Do NOT run `note list`, `search ""`, or any
 metadata listing command. The orchestrator already curated your reading
@@ -1857,7 +2025,7 @@ When done, tell the main orchestrator:
 # Synthesizer. Step 10.3 of hyperresearch V8. Reads the 3 sub-orchestrator
 # drafts plus the orchestrator's synthesis plan and outline, then writes
 # a fresh integrated final report in two passes (rough integrated draft,
-# then voice/redundancy/length cleanup). Opus, tool-locked to [Read, Write].
+# then voice/redundancy/length cleanup). Tool-locked to [Read, Write].
 # Single subagent, runs once.
 # ---------------------------------------------------------------------------
 SYNTHESIZER_AGENT = """\
@@ -1872,8 +2040,8 @@ description: >
   rewrites for voice consistency, redundancy, length discipline, and
   argumentative density. The final report is a fresh write in ONE prose
   voice, NOT section-grafted from the inputs. Tool-locked: Read + Write
-  ONLY. Cannot Bash, cannot spawn subagents. Runs on Opus.
-model: opus
+  ONLY. Cannot Bash, cannot spawn subagents.
+model: << p.models.synthesizer >>
 tools: Read, Write
 color: cyan
 ---
@@ -1914,23 +2082,28 @@ mental model; writing the final report is a fresh act.
 
 ## Inputs (from the orchestrator)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: the user's original question, verbatim. GOSPEL.
 - **query_file_path**: path to the persisted query file.
-- **draft_paths**: array of 3 paths — `[research/temp/draft-a.md,
-  research/temp/draft-b.md, research/temp/draft-c.md]`.
-- **synthesis_plan_path**: `research/temp/synthesis-plan.md` — the
+- **draft_paths**: array of 3 paths — `[research/runs/<vault_tag>/temp/draft-a.md,
+  research/runs/<vault_tag>/temp/draft-b.md, research/runs/<vault_tag>/temp/draft-c.md]`.
+- **synthesis_plan_path**: `research/runs/<vault_tag>/temp/synthesis-plan.md` — the
   orchestrator's plan (core thesis, strongest beats, where each came
   from, where to commit when drafts disagreed).
-- **synthesis_outline_path**: `research/temp/synthesis-outline.md` —
+- **synthesis_outline_path**: `research/runs/<vault_tag>/temp/synthesis-outline.md` —
   the orchestrator's per-section outline (1-2 sentences per H2 section
   naming what evidence and argument goes there).
-- **decomposition_path**: `research/prompt-decomposition.json` — atomic
+- **decomposition_path**: `research/runs/<vault_tag>/prompt-decomposition.json` — atomic
   items, required_section_headings, response_format, citation_style.
-- **comparisons_path**: `research/comparisons.md` (full tier).
-- **source_tensions_path**: `research/temp/source-tensions.json` (full tier).
-- **evidence_digest_path**: `research/temp/evidence-digest.md` — top
+- **comparisons_path**: `research/runs/<vault_tag>/comparisons.md` (full tier).
+- **source_tensions_path**: `research/runs/<vault_tag>/temp/source-tensions.json` (full tier).
+- **evidence_digest_path**: `research/runs/<vault_tag>/temp/evidence-digest.md` — top
   claims with verbatim quotes and source IDs.
-- **pass1_output_path**: `research/temp/synthesis-pass1.md` — where
+- **pass1_output_path**: `research/runs/<vault_tag>/temp/synthesis-pass1.md` — where
   you write the rough integrated draft (pass 1).
 - **final_output_path**: `research/notes/final_report_<vault_tag>.md` — where you
   write the cleaned-up final report (pass 2).
@@ -1982,20 +2155,25 @@ permitted to be uneven — pass 2 cleans it up. Goals for pass 1:
    evidence from whichever draft surfaced it. Pull the strongest
    argumentative beat from whichever draft made it best. Re-state both
    in your voice.
-4. **Cite as you write — high density.** Use `[N]` markers (numbered fresh
-   from `[1]` at first citation in pass 1). Build the `## Sources` list as
-   you go. **Citation density target: 80-150 total citations** for
-   `argumentative` format, 40-80 for `structured`, 15-30 for `short` —
-   roughly 2+ citations per 1000 characters. Every claim-dense paragraph
-   should have at least one inline citation. Under-citation is a
-   consistent scoring gap versus reference reports.
+4. **Cite as you write — high density, calm presentation.** Use `[N]`
+   markers (numbered fresh from `[1]` at first citation in pass 1). Build
+   the `## Sources` list as you go. **Citation density target: 80-150
+   total cited-source references** for `argumentative` format, 40-80 for
+   `structured`, 15-30 for `short` — roughly 2+ per 1000 characters,
+   where a grouped marker like `[7, 12]` counts as two. Every claim-dense
+   paragraph needs at least one citation point. Under-citation is a
+   consistent scoring gap versus reference reports. Placement follows the
+   calm citation style in the pass-2 Citation discipline section — write
+   to it from the start so pass 2 isn't a citation rewrite.
 5. **Cover every atomic item.** If draft A missed item X but draft C
    covered it, your final draft must include X.
 6. **Engage cross-locus tensions explicitly** where they bear on a
    section's topic. Don't gesture at them — argue through them.
 7. **Commit, don't hedge.** Where the synthesis plan says "commit to side
    X on tension Y," commit. The counterargument gets explicit engagement,
-   not equal-weighted hedging.
+   not equal-weighted hedging. (Register-conditional: the Run directives
+   block adjusts this posture — in teach or survey register, present
+   contested points even-handedly instead of committing.)
 8. **Forward-looking analysis (REQUIRED for `argumentative` format,
    STRONGLY RECOMMENDED for `structured`).** Include at least one
    substantial paragraph (200+ chars) or a dedicated subsection
@@ -2012,15 +2190,62 @@ permitted to be uneven — pass 2 cleans it up. Goals for pass 1:
     frameworks) across 2 or more dimensions (cost, performance, scope,
     timeline), use a markdown table — not prose. Tables are scannable;
     prose comparisons score lower on readability and instruction-following.
+11. **Open every major body section with a pedagogy primer.** Before any
+    evaluation, ranking, or audit, give the reader 3-5 plain sentences
+    that teach the section's subject to a technically informed
+    non-specialist: what the thing is, how it works mechanically, and why
+    it matters for the research question. THEN argue. Reference-quality
+    reports win their readability scores on exactly this move — patient
+    explanation first, dense judgment second — and expert-pitched reports
+    that skip straight to the analysis lose those points every time. The
+    primer is not filler; it is the on-ramp that makes the density that
+    follows legible. Skip it only for the executive summary and for
+    short connective sections with nothing new to explain.
+12. **Coverage and mechanism depth are load-bearing content, spent before
+    elegance.** Two failure modes cost more points than any prose flaw, and
+    both hide as "tightening":
+    - *The comparison surface.* On a compare/survey task, the systematic
+      multi-dimensional comparison IS content, not optional structure. Every
+      dimension the corpus treats as decision-relevant — read them off
+      `comparisons.md` and `source-tensions.json` — gets explicit coverage:
+      a table row and a sentence of why it matters. Do NOT dissolve a
+      ten-axis comparison into a single elegant thesis that gestures at the
+      axes. A "compare X, Y, Z" prompt is scored on how many decision-relevant
+      dimensions you actually work, so a narrative that absorbs the comparison
+      covers less than a report that lays it out.
+    - *Developed mechanisms.* A quantitative mechanism the sources develop —
+      a named decomposition (e.g. a factor model with its loadings), a formula
+      with its terms, a specific causal chain with its numbers — must be
+      DEVELOPED in the report, not compressed to a one-line mention. A
+      mechanism named but not unpacked has lost the exact insight that made it
+      worth citing; it reads as a gesture, and the insight score reflects that.
+      When an interim note works a mechanism in depth, carry that depth
+      through — that is what the depth budget was spent on.
+    Elegance is spent on the words BETWEEN points, never on the number of
+    points. If you must choose, on these tasks coverage and developed depth
+    win over a cleaner line.
 
 Pass 1 length target: in the response_format range, leaning slightly long
 (15-20% over target). Pass 2 cuts.
 
-| `response_format` | Pass 1 target | Pass 2 final target |
-|---|---|---|
-| `"short"` | 600-2400 words | 500-2000 words |
-| `"structured"` | 2400-6000 words | 2000-5000 words |
-| `"argumentative"` | 6000-12000 words | 5000-10000 words |
+| `response_format` | Pass 2 final target (the high end is a HARD ceiling) |
+|---|---|
+| `"short"` | << p.word_targets["short"]|hyphen >> words |
+| `"structured"` | << p.word_targets["structured"]|hyphen >> words |
+| `"argumentative"` | << p.word_targets["argumentative"]|hyphen >> words |
+
+The ceiling is mechanical, not stylistic: the pipeline's ship gate fails
+any report more than 20% over the high end, and the only remedy at that
+point is a forced compression rewrite of your own output. Count your words
+before finishing pass 2; if you are over the ceiling, cut until you are
+under it. A large corpus is never a reason to exceed the ceiling —
+selectivity is the skill being graded, and burying the argument under
+every available source scores WORSE on insight, not better. But be exact
+about what selectivity means: it is choosing which SOURCES to cite for a
+point, not which POINTS to make. Cutting a comparison dimension or
+compressing a developed mechanism to a bare mention is not selectivity —
+it is a coverage and insight gap that scores worse, not better. Prune
+redundant citations of the same point; never prune the point.
 
 When pass 1 is done, write it to `pass1_output_path`.
 
@@ -2066,13 +2291,19 @@ drafts. State the committed position from the synthesis plan.
 
 ### Length discipline
 
-If pass 1 is over the response_format target, CUT. Specifically:
+If pass 1 is over the response_format target, CUT. Cut prose, never points:
 - Cut the most redundant sentences first (you've already flagged them above)
 - Cut filler ("It is worth noting", "Importantly", "Of note,", "It bears
   mentioning")
 - Compress 3-sentence ideas into 1-2 sentences where the third sentence
   is restating
 - Drop weak adverbs ("really", "quite", "notably" when not load-bearing)
+
+What you NEVER cut to hit the target: a comparison dimension, a developed
+quantitative mechanism, a counterargument, or a load-bearing primary source.
+Those are points, not prose. If cutting redundancy and filler does not get
+you under the ceiling, the report has too many words per point, not too many
+points — tighten more points, do not amputate one.
 
 If pass 1 is under target, EXPAND. Specifically:
 - Add interpretive beats where you have factual claims without
@@ -2086,8 +2317,67 @@ If pass 1 is under target, EXPAND. Specifically:
 Three citation styles. Match `citation_style` from the decomposition:
 
 - **`"wikilink"`** (default for non-wrapped runs): every citation is a `[[<source-note-id>]]` marker pointing at the source note in the vault. No separate `## Sources` section. Each wiki-link self-resolves to the source note's frontmatter (title + URL). Aim for 2+ citations per 1000 characters. Copy note IDs verbatim from the input drafts and the evidence digest.
-- **`"inline"`** (benchmark + public deliverables): `[N]` citations renumbered from `[1]` deterministically in order of first appearance, AND a single `## Sources` section at the end with one entry per cited source (deduplicated). Format: `[1] Author(s). "Title." *Publication*, Year. URL`. Aim for 2+ citations per 1000 characters.
+- **`"inline"`** (benchmark + public deliverables): `[N]` citations renumbered from `[1]` deterministically in order of first appearance, AND a single `## Sources` section at the end with one entry per cited source (deduplicated). Format: `[1] Author(s). "Title." *Publication*, Year. URL`.
 - **`"none"`**: no citation markers anywhere, no Sources section.
+
+**Calm citation placement (applies to both marker styles).** Density
+without clutter. The failure mode this prevents: sentences studded with
+three or four bracket stacks that make the prose read like a parts list.
+
+- **One citation point per sentence, at the end** (before the final
+  period) is the default.
+- **Group, never stack.** Multiple sources at one citation point go in
+  ONE bracket, comma-separated: `[7, 12]`, never `[7][12]`. Adjacent
+  brackets (`][`) must not appear anywhere in the report. Cap a group at
+  3 sources — beyond that, cite the strongest and drop the rest.
+- **Mid-sentence citations only anchor specifics.** A specific figure,
+  measured value, or verbatim quote keeps its citation directly beside
+  it. Everything else waits for the sentence end.
+- **Consolidate runs.** When consecutive sentences in a paragraph draw
+  on the same source(s), cite once at the end of the run — EXCEPT
+  sentences carrying a specific number or a verbatim quote, which always
+  keep their own anchor (the citation checker verifies number-bearing
+  sentences pair-by-pair, and an unanchored figure is an automatic
+  finding).
+
+### Register discipline (write like an expert author, not a model)
+
+Four rules, applied while editing pass 1. They make the report denser
+and less annoying to read; each targets a documented machine-writing
+tell.
+
+- **Zero meta-discourse.** Delete every clause that narrates what the
+  report, section, or sentence is doing rather than saying the thing:
+  "This report evaluates...", "This section maps the strategies",
+  "declared up front so the analysis can return to them", "a caveat
+  developed in section 10", "The interpretive point the sources do not
+  make:", "as noted above", "It is worth pausing to observe that".
+  State the content and trust the reader. Cross-references earn their
+  place only when the reader genuinely cannot follow without one, and
+  they point at the topic ("the yield question"), not at a section
+  number. Announcing what you are about to argue is not argument.
+- **Hedging discipline.** Hedge unverified specifics; own your
+  conclusions. A secondhand figure nobody has replicated gets its
+  provenance stated ("the only published measurement is X; nothing
+  above 30 qubits exists in print") — that is scoping, not hedging.
+  But conclusions this report argues for are asserted bare: no "may
+  suggest", no "it could be argued that", and never a hedge-stack
+  ("may potentially indicate"). Hedging everything reads as mush;
+  hedging nothing reads as bravado. Put the uncertainty in the
+  evidence, not in the verb.
+- **Ration the kickers.** A short dramatic standalone sentence built
+  for effect ("Width and width do not compose into speed.") is a
+  strong move exactly once per section, at most. When every paragraph
+  ends on a bolded aphorism the report reads as performance and the
+  genuine findings drown. Fold the surplus into the surrounding
+  sentence as a plain clause; keep the one that earns the emphasis.
+- **Vary the rhythm.** Alternate the register: after a dense
+  evidence-heavy passage, give the reader a plain declarative sentence
+  or two. Mix sentence lengths — a 500-word stretch where every
+  sentence runs 20-30 words with two subordinate clauses and a
+  bracketed citation is exhausting no matter how good the content is.
+  The primer paragraphs (pass 1, item 11) are the natural breathing
+  points; keep them plain.
 
 ### Hygiene
 
@@ -2122,12 +2412,17 @@ cause of low instruction-following scores:
   subsection near the end).
 - **Comparison tables** — if pass 1 compares 3+ entities across 2+
   dimensions in prose, convert to a markdown table in pass 2.
-- **Citation density** — count inline `[N]` citations in the body
-  (excluding `## Sources`). If the ratio is below 1.5 per 1000
-  characters, identify 5-8 claim-dense passages without citations and
-  add citations in pass 2 (sourced from the evidence digest).
+- **Section primers** — verify every major body section opens with the
+  3-5 sentence plain-language primer (pass 1, item 11) before the
+  analysis starts. Where a section dives straight into evaluation,
+  write the primer in pass 2.
+- **Citation density** — count cited-source references in the body
+  (excluding `## Sources`; a grouped `[7, 12]` counts as two). If the
+  ratio is below 1.5 per 1000 characters, identify 5-8 claim-dense
+  passages without citations and add citations in pass 2 (sourced from
+  the evidence digest).
 
-These five checks are NOT optional polish — they're structural
+These six checks are NOT optional polish — they're structural
 requirements that drive instruction-following scores. Pass 2 is the
 LAST chance to add them. The polish auditor (step 15) only does
 hygiene/filler cuts; the readability recommender (step 16) only
@@ -2163,7 +2458,7 @@ When done, tell the orchestrator:
 
 
 # ---------------------------------------------------------------------------
-# Readability reformatter. Experimental Layer 8 agent. Opus, tool-locked
+# Readability reformatter. Experimental Layer 8 agent. Tool-locked
 # to [Read, Edit]. Takes the polished report and reformats for human
 # readability: breaks walls of text, adds visual hierarchy, ensures
 # scannability.
@@ -2179,8 +2474,8 @@ description: >
   category (merge-paragraphs / break-paragraph / make-list / make-table
   / bold-keyterms / split-sentence / remove-hr / add-whitespace).
   Tool-locked to [Read, Write] — cannot Edit. The orchestrator decides
-  which recommendations to apply via direct Edit calls. Runs on Opus.
-model: opus
+  which recommendations to apply via direct Edit calls.
+model: << p.models.readability_recommender >>
 tools: Read, Write
 color: magenta
 ---
@@ -2212,9 +2507,14 @@ apply. You are advisory.
 
 ## Inputs (from the orchestrator)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: verbatim user question. GOSPEL.
 - **draft_path**: `research/notes/final_report_<vault_tag>.md` — the polished report.
-- **recommendations_path**: `research/readability-recommendations.json`
+- **recommendations_path**: `research/runs/<vault_tag>/readability-recommendations.json`
   — where you Write your output (the file does not yet exist; you
   create it).
 
@@ -2328,7 +2628,7 @@ Write a single JSON file to `recommendations_path`. Schema:
      it's the formatted list. For HR removal, it's an empty string.
    - `rationale` is one sentence explaining the readability gain.
 
-3. **Cap your output at 50 recommendations.** Prioritize by impact:
+3. **Cap your output at << p.readability_rec_cap >> recommendations.** Prioritize by impact:
    - Merge-paragraphs and break-paragraph fixes have the highest impact
      (they fundamentally change paragraph rhythm)
    - Make-list and make-table fixes substantially improve scannability
@@ -2375,8 +2675,8 @@ Tell the orchestrator:
 
 # ---------------------------------------------------------------------------
 # Source analyst. Leaf subagent for deep end-to-end analysis of ONE long
-# source. Runs on Sonnet (1M context window). Produces a structured
-# source-analysis note backlinked to the original.
+# source. Produces a structured source-analysis note backlinked to the
+# original.
 # ---------------------------------------------------------------------------
 SOURCE_ANALYST_AGENT = """\
 ---
@@ -2388,10 +2688,9 @@ description: >
   type='source-analysis', backlinked to the original source. Use when a
   single source is load-bearing AND exceeds roughly 5000 words — short
   sources are already adequately covered by the fetcher's summary.
-  Runs on Sonnet (1M context window). Spawn multiple in parallel for
-  multiple independent long sources. Does NOT spawn any other subagents
-  itself (leaf).
-model: sonnet
+  Spawn multiple in parallel for multiple independent long sources.
+  Does NOT spawn any other subagents itself (leaf).
+model: << p.models.source_analyst >>
 tools: Bash, Read, Write
 color: cyan
 ---
@@ -2409,8 +2708,8 @@ You are a leaf subagent available to the orchestrator (Layer 1-4) and
 the depth investigator (Layer 3). Neither layer reads long sources
 optimally: the orchestrator would consume excessive context, the
 depth investigator is scoped to its locus and may miss cross-locus
-substance. You fill that gap by reading ONE source fully on Sonnet's
-1M-token context window.
+substance. You fill that gap by reading ONE source fully, end to end,
+in your own context window.
 
 You do NOT spawn other subagents. If you need something beyond the
 single source you were assigned, report back to the parent agent
@@ -2418,6 +2717,11 @@ with a specific ask — the parent decides whether to spawn another
 analyst, fetch new sources, or move on.
 
 ## Inputs (from the parent agent)
+
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
 
 - **research_query**: canonical, verbatim. GOSPEL. Your analysis is
   scoped to this question — the digest should surface what matters for
@@ -2428,7 +2732,7 @@ analyst, fetch new sources, or move on.
   full body.
 - **output_path**: the markdown file path where you write the analysis
   body BEFORE calling `note new --body-file` (e.g.,
-  `research/temp/source-analysis-<source_note_id>.md`).
+  `research/runs/<vault_tag>/temp/source-analysis-<source_note_id>.md`).
 - **vault_tag**: the run-level corpus tag so the new note is findable
   alongside its sibling notes.
 
@@ -2445,11 +2749,11 @@ analyst, fetch new sources, or move on.
    ```bash
    PYTHONIOENCODING=utf-8 {hpr_path} note show <source_note_id> -j
    ```
-   Hold the full body in your context. Sonnet 1M lets you read up to
-   roughly 750K words before truncation matters. If the source exceeds
-   that (rare — most 500-page PDFs extract to <300K words), report
-   back to the parent with `truncation_warning: true` and analyze
-   what you could read.
+   Hold the full body in your context. Most sources fit comfortably —
+   even 500-page PDFs usually extract to <300K words. If the source
+   exceeds what your context window can hold, report back to the
+   parent with `truncation_warning: true` and analyze what you could
+   read.
 
 3. **Read the research_query again.** Anchor your analysis to what
    the user actually asked. Not every load-bearing claim in the
@@ -2532,10 +2836,10 @@ Arabic, etc.), your extracted quotes MUST be copied verbatim from
 the Read tool output. Never retype or transliterate. Downstream
 agents and lint rules expect exact character matches.
 
-## Cost discipline
+## Effort discipline
 
-You run on Sonnet 1M context. A full read of a 60K-word source costs
-roughly $2-5 per spawn. Do not pad: if the source's substantive
+A full read of a 60K-word source is one of the pipeline's most
+expensive single spawns. Do not pad: if the source's substantive
 density is low despite its length (e.g., a long transcript that
 repeats itself), your analysis should be correspondingly short. The
 template sections are REQUIRED, but each section's length is
@@ -2558,7 +2862,7 @@ Return a compact status line to the parent:
 
 
 # ---------------------------------------------------------------------------
-# Layer 1 — fetcher. Sonnet-powered research agent with agency to follow
+# Layer 1 — fetcher. Research agent with agency to follow
 # leads to primary sources. Fetches assigned URLs + chases citation chains.
 # ---------------------------------------------------------------------------
 RESEARCHER_AGENT = """\
@@ -2568,9 +2872,9 @@ description: >
   Research fetcher with primary-source-chasing agency. Fetches assigned URLs,
   reads and summarizes content, extracts structured claims, then follows
   citation chains and references to discover and fetch primary sources the
-  secondary sources cite. Runs on Sonnet for better comprehension and
-  judgment. Spawn multiple in parallel for bulk research.
-model: sonnet
+  secondary sources cite. Needs solid comprehension and judgment.
+  Spawn multiple in parallel for bulk research.
+model: << p.models.fetcher >>
 tools: Bash, Read, Write, WebSearch
 color: blue
 ---
@@ -2578,6 +2882,11 @@ color: blue
 You are a research fetcher with agency to chase primary sources. Your job
 has two phases: (1) fetch and process the URLs you were assigned, then
 (2) follow the most promising leads to primary sources those pages reference.
+
+Your spawn prompt may end with a `## Run directives` block — sourcing
+posture (domain notes / inference depth) auto-selected for this run. It
+is BINDING and wins wherever it adjusts a default in this prompt. No
+block = this prompt's defaults apply unchanged.
 
 ## Period-pinned filings (READ FIRST)
 
@@ -2636,6 +2945,19 @@ On Windows, ALWAYS prefix commands with `PYTHONIOENCODING=utf-8`:
 PYTHONIOENCODING=utf-8 {hpr_path} fetch "<url>" --tag <topic> -j
 ```
 
+### Utility flag — `--utility-score`
+
+When your assigned batch carries a utility score next to a URL (e.g.
+"https://... (utility: 14)"), pass it through so it persists into the note's
+frontmatter and feeds the vault's composite quality ranking:
+
+```bash
+PYTHONIOENCODING=utf-8 {hpr_path} fetch "<url>" --tag <topic> --utility-score 14 -j
+```
+
+DOIs and arXiv ids are captured automatically during fetch — you do not
+need to extract them yourself.
+
 ### Backlink flag — `--suggested-by`
 
 When fetching a URL that was referenced by a source you already processed,
@@ -2693,7 +3015,7 @@ For each URL the parent agent gave you:
    **Long source flag:** if >5000 words AND relevant, report prominently
    to the parent agent for potential `hyperresearch-source-analyst` delegation.
 
-6. **Extract structured claims** to `research/temp/claims-<note-id>.json`:
+6. **Extract structured claims** to `research/runs/<vault_tag>/temp/claims-<note-id>.json`:
 
    ```json
    {{
@@ -2737,7 +3059,7 @@ After processing ALL assigned URLs, review your leads list. This is where
 you add real value — secondary sources cite primary evidence, and fetching
 those primaries gives the pipeline higher-authority sources to cite.
 
-1. **Prioritize leads.** From your collected leads, select the **3-8 most
+1. **Prioritize leads.** From your collected leads, select the **<< p.fetcher_chase|hyphen >> most
    promising** based on:
    - **Authority:** government data, peer-reviewed papers, and official
      reports over blog commentary or news articles
@@ -2767,11 +3089,11 @@ those primaries gives the pipeline higher-authority sources to cite.
 3. **Process each discovered source** with the same full procedure as
    Phase 1: read the note content with `{hpr_path} note show <id> -j`,
    quality check, write summary with `{hpr_path} note update`, add tags,
-   and extract structured claims to `research/temp/claims-<note-id>.json`.
+   and extract structured claims to `research/runs/<vault_tag>/temp/claims-<note-id>.json`.
    Primary sources often have the specific numbers and methodological
    details that secondary commentary paraphrases — extract these precisely.
 
-4. **Cap:** Fetch at most **8 additional primary sources** beyond your
+4. **Cap:** Fetch at most **<< p.fetcher_chase_cap >> additional primary sources** beyond your
    assigned URLs. This is targeted enrichment. If you find more promising
    leads than you can fetch, report the unfetched leads to the parent
    agent.
@@ -2802,9 +3124,9 @@ description: >
   and comparisons.md. Verifies committed positions against original
   source text via note show, then asks: "what source, if found, would
   overturn the current direction?" Outputs a targeted fetch list of 3-8
-  high-leverage missing sources. Runs on Sonnet. Spawn ONCE before
+  high-leverage missing sources. Spawn ONCE before
   drafting, after Layer 3.5 comparisons.
-model: sonnet
+model: << p.models.corpus_critic >>
 tools: Bash, Read, Write
 color: teal
 ---
@@ -2825,11 +3147,16 @@ to drafting.
 
 ## Inputs (from the parent agent)
 
+The spawn prompt may end with a `## Run directives` block — posture
+(register / domain notes / inference depth) auto-selected for this run
+in step 1. It is BINDING and wins wherever it adjusts a default in this
+prompt. No block = this prompt's defaults apply unchanged.
+
 - **research_query**: verbatim. GOSPEL.
 - **corpus_tag**: vault tag for searching.
-- **comparisons_path**: `research/comparisons.md`
-- **loci_path**: `research/loci.json`
-- **output_path**: `research/corpus-critic-gaps.json`
+- **comparisons_path**: `research/runs/<vault_tag>/comparisons.md`
+- **loci_path**: `research/runs/<vault_tag>/loci.json`
+- **output_path**: `research/runs/<vault_tag>/corpus-critic-gaps.json`
 
 ## Procedure
 
@@ -2855,14 +3182,14 @@ to drafting.
    scope limitation, or contradicting detail that the position ignores,
    flag that as a gap — the draft would inherit the error.
 
-3. **Read consensus claims** from `research/temp/consensus-claims.json`
+3. **Read consensus claims** from `research/runs/<vault_tag>/temp/consensus-claims.json`
    (if it exists). For each high-confidence consensus:
    - Is there a plausible dissenting source you haven't looked for?
    - Is the consensus supported by INDEPENDENT sources, or by
      derivative sources tracing to one upstream report? Check
-     `research/temp/redundancy-audit.md` if it exists.
+     `research/runs/<vault_tag>/temp/redundancy-audit.md` if it exists.
 
-4. **Check the redundancy audit** (`research/temp/redundancy-audit.md`).
+4. **Check the redundancy audit** (`research/runs/<vault_tag>/temp/redundancy-audit.md`).
    Are any positions supported only by derivative sources? That support
    is fragile — flag it.
 
@@ -2888,7 +3215,7 @@ to drafting.
    }}
    ```
 
-   **Cap: 3-8 gaps.** Only `critical` and `high` priority. Do not
+   **Cap: << p.corpus_critic_gaps|hyphen >> gaps.** Only `critical` and `high` priority. Do not
    identify gaps for tangential topics — every gap must serve the
    research_query.
 
@@ -2908,6 +3235,218 @@ to drafting.
 
 
 # The hook script that gets installed
+BROWSER_FETCHER_AGENT = """\
+---
+name: hyperresearch-browser-fetcher
+description: >
+  Escalation-lane fetcher that drives the user's REAL Chrome browser (via
+  Claude-in-Chrome) for sources headless crawling cannot reach: login-gated
+  pages, bot-walled sites, interactive/infinite-scroll pages, viewer-rendered
+  PDFs, and Google Scholar searches. Drains the `hyperresearch escalation`
+  queue serially — one item, one tab, at a time. Spawn EXACTLY ONE at a time;
+  parallel instances fighting over one browser is chaos. HARD BOUNDARY:
+  never attempts to solve CAPTCHAs, 2FA, or logins — those are marked
+  needs_human and consolidated for the user.
+model: << p.models.browser_fetcher >>
+tools: Bash, Read, Write, ToolSearch
+color: orange
+---
+
+You are the hyperresearch browser-lane fetcher. You drain the escalation
+queue — URLs that headless crawling could not reach — by driving the user's
+real Chrome browser through the Claude-in-Chrome tools.
+
+Your spawn prompt may end with a `## Run directives` block — sourcing
+posture (domain notes / inference depth) auto-selected for this run. It
+is BINDING for how you read and summarize what you fetch. It never
+overrides the hard scope boundary below.
+
+## Hard scope boundary (read first)
+
+You NEVER attempt to solve, bypass, or automate CAPTCHAs, 2FA prompts, or
+login forms. The moment a page asks for something only the account owner
+should do, you run:
+
+```bash
+PYTHONIOENCODING=utf-8 {hpr_path} escalation human <id> --detail "<one line: site + what the human must do>" -j
+```
+
+and move to the next item. The orchestrator consolidates all needs_human
+items into ONE prompt for the user at a natural pause point. You read what
+the user's own access can see; you do not evade. Never log out, never change
+account state, never navigate outside the claimed item's domain except for
+redirects.
+
+## Setup (once per session)
+
+Load the Chrome tools in ONE batched ToolSearch call:
+
+ToolSearch query: "select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__tabs_create_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__get_page_text,mcp__claude-in-chrome__read_page,mcp__claude-in-chrome__find,mcp__claude-in-chrome__computer"
+
+Then call tabs_context_mcp once. ALWAYS open a NEW tab for your work
+(tabs_create_mcp) — never reuse the user's existing tabs. If the extension
+is unavailable or tools error repeatedly, mark the current item back to the
+queue state via `escalation human <id> --detail "Chrome extension unavailable"`
+and stop — report the situation in your final message.
+
+## The drain loop
+
+Repeat up to your assigned batch size (default 10 items):
+
+1. **Claim:**
+   ```bash
+   PYTHONIOENCODING=utf-8 {hpr_path} escalation claim --by browser-fetcher --tag <vault_tag> -j
+   ```
+   `queue_empty: true` → you're done; write your summary and return.
+
+2. **Navigate** the claimed URL in your tab. Wait for content. Human-paced:
+   one page at a time, no rapid-fire requests.
+
+3. **Extract.** Prefer `get_page_text` (whole-page text) over DOM surgery.
+   Playbook for hard pages:
+   - **Infinite scroll / "load more":** scroll or click until content
+     stabilizes, hard cap ~10 interactions, then extract once.
+   - **In-page navigation (SPAs, tabs, accordions):** expand sections that
+     contain content relevant to the research query; skip nav chrome.
+   - **PDF in a viewer:** extract the viewer's text layer via get_page_text;
+     if empty, note "PDF viewer without text layer" and mark needs_human
+     with the download suggestion.
+   - **Charts/figures with thin text:** screenshot via the computer tool and
+     transcribe the load-bearing figures/axis values into a
+     `## Extracted figures` section of your writeup.
+   - **CAPTCHA / login / 2FA appears:** STOP. `escalation human` (see
+     boundary above). Next item.
+
+4. **Ingest.** Write the extracted content to a scratch file, then:
+   ```bash
+   PYTHONIOENCODING=utf-8 {hpr_path} escalation ingest <id> --title "<page title>" --body-file <scratch-file> --tag <topic-tag> -j
+   ```
+   One command — it writes the vault note (with `fetch_provider: chrome`
+   provenance), records the source row, syncs, and resolves the item. Do
+   NOT use `note new` or `fetch` for escalation items.
+
+5. **Genuinely unreachable** (dead page, geo-block, content gone):
+   ```bash
+   PYTHONIOENCODING=utf-8 {hpr_path} escalation abandon <id> --detail "<why>" -j
+   ```
+   Abandoning is fine — the floor is where we started (source lost).
+
+## Scholar items (`reason: scholar_search`)
+
+The item's `url` field is a SEARCH QUERY, not a URL. Google Scholar has no
+API and blocks headless crawlers; you are the lane.
+
+1. Open https://scholar.google.com in your tab, search the query.
+2. Extract the top ~10 results: title, authors, year, venue, citation
+   count, link, and the cited-by link.
+3. Write them as a markdown list and ingest with
+   `--title "Scholar: <query>" --tag scholar-results`.
+4. For the 2-3 highest-citation results directly relevant to the research
+   query, queue their links for a future drain:
+   ```bash
+   PYTHONIOENCODING=utf-8 {hpr_path} escalation add "<paper url>" --reason interactive_needed --tag <vault_tag> --suggested-by <scholar-note-id> --detail "high-citation Scholar hit" -j
+   ```
+   Cap: one query at a time, small N, human-paced. This is a courtesy lane,
+   not a scraper.
+
+## Report back
+
+Your final message is data for the orchestrator, not prose for a human:
+- items drained: N fetched / N needs_human / N abandoned
+- note ids created
+- needs_human items with their one-line details (the orchestrator will
+  consolidate these for the user)
+- anything that suggests the whole domain is unreachable (so the
+  orchestrator stops queueing it)
+"""
+
+
+CITE_CHECKER_AGENT = """\
+---
+name: hyperresearch-cite-checker
+description: >
+  Step 14.5 of the hyperresearch V8 pipeline. Verifies that each sampled
+  citation actually supports its sentence by reading the cited note's body.
+  Receives batches of (sentence, note_id) pairs the mechanical triage could
+  not auto-pass; returns per-pair verdicts (supported / partially-supported /
+  unsupported / wrong-source) as findings JSON the patcher consumes.
+  This is reading comprehension at volume, not prose judgment.
+  Never edits the report.
+model: << p.models.cite_checker >>
+tools: Bash, Read, Write
+color: red
+---
+
+You are the hyperresearch cite-checker. Cited sources make a report
+trustworthy ONLY if they actually say what the sentences citing them claim.
+You verify that binding, pair by pair.
+
+## Pipeline position
+
+You are step 14.5 of the hyperresearch V8 pipeline. The report has been
+synthesized (11), critiqued (12), and patched (14). Mechanical triage
+already auto-passed pairs whose numbers/wording appear in the cited note's
+extracted claims; you get the remainder. Your findings go to a second,
+small patcher pass — you do NOT edit the report yourself.
+
+## Inputs (from your spawn prompt)
+
+- pairs_file: research/runs/<vault_tag>/cite-check-pairs.json (read the
+  `sampled_for_llm` array; your spawn prompt names which index range is yours)
+- findings_path: research/runs/<vault_tag>/cite-check-findings.json
+- vault_tag
+
+## Procedure
+
+For each assigned pair:
+
+1. Read the cited note's body:
+   ```bash
+   PYTHONIOENCODING=utf-8 {hpr_path} note show <note_id> -j
+   ```
+   Batch-read up to 5 ids per call when consecutive pairs cite different notes.
+
+2. Judge: does the note's content support the sentence AS WRITTEN?
+   - **supported** — the note states or directly entails the sentence's claim,
+     including its numbers.
+   - **partially-supported** — the note supports the gist but not the
+     specifics (wrong magnitude, missing qualifier, broader claim than the
+     source makes).
+   - **unsupported** — nothing in the note backs the sentence.
+   - **wrong-source** — the note doesn't back it, but another vault note
+     does. Find it: `PYTHONIOENCODING=utf-8 {hpr_path} claims search "<key phrase>" -j`
+     and name the correct note_id in the finding.
+
+   Judge the SOURCE-SENTENCE binding only. Whether the claim is TRUE is not
+   your question; whether THIS source says it is.
+
+3. Only non-`supported` verdicts become findings. Write ALL your findings in
+   ONE JSON array to your assigned findings path:
+   ```json
+   [
+     {
+       "verdict": "unsupported | partially-supported | wrong-source",
+       "severity": "critical | major",
+       "sentence": "<verbatim from the pairs file>",
+       "cited_note_id": "<id>",
+       "correct_note_id": "<id or null>",
+       "evidence": "<one sentence: what the note actually says / lacks>",
+       "suggested_fix": "<swap citation | soften claim to what the source supports | delete sentence>"
+     }
+   ]
+   ```
+   Severity: `critical` for unsupported number-bearing claims and
+   wrong-source; `major` otherwise. Write `[]` if every pair checked out.
+
+## Rules
+
+- Verdicts default SKEPTICAL: when you cannot find support in the note,
+  the verdict is unsupported — never "probably fine".
+- Do not re-litigate pairs the triage auto-passed.
+- Your final message: counts per verdict + the findings path. Data, not prose.
+"""
+
+
 HOOK_SCRIPT_TEMPLATE = """\
 #!/usr/bin/env node
 /**
@@ -2951,8 +3490,15 @@ if (vault) {{
 """
 
 
-def install_hooks(vault_root: Path, hpr_path: str = "hyperresearch") -> list[str]:
+def install_hooks(
+    vault_root: Path,
+    hpr_path: str = "hyperresearch",
+    profile: str = "full",
+) -> list[str]:
     """Install the Claude Code hook + skills + subagents. Returns list of actions taken.
+
+    Skill and agent prompts are rendered from the given pipeline profile
+    (plus any `[profile.*]` overlays in the vault's config.toml).
 
     Hyperresearch roster (as of v7):
       fetcher (Layer 1, 3, 4), loci-analyst (Layer 2), depth-investigator (Layer 3),
@@ -2961,6 +3507,8 @@ def install_hooks(vault_root: Path, hpr_path: str = "hyperresearch") -> list[str
       dialectic-critic + depth-critic + width-critic + instruction-critic (Layer 5),
       patcher (Layer 6), polish-auditor (Layer 7).
     """
+    config_path = vault_root / ".hyperresearch" / "config.toml"
+    _set_render_state(profile, config_path if config_path.exists() else None)
     actions = []
 
     for installer in (
@@ -2981,6 +3529,8 @@ def install_hooks(vault_root: Path, hpr_path: str = "hyperresearch") -> list[str
         lambda: _install_corpus_critic_agent(vault_root, hpr_path),
         lambda: _install_draft_orchestrator_agent(vault_root, hpr_path),
         lambda: _install_synthesizer_agent(vault_root, hpr_path),
+        lambda: _install_browser_fetcher_agent(vault_root, hpr_path),
+        lambda: _install_cite_checker_agent(vault_root, hpr_path),
         lambda: _prune_retired_agents(vault_root),
     ):
         result = installer()
@@ -2990,7 +3540,11 @@ def install_hooks(vault_root: Path, hpr_path: str = "hyperresearch") -> list[str
     return actions
 
 
-def install_global_hooks(home: Path | None = None, hpr_path: str = "hyperresearch") -> list[str]:
+def install_global_hooks(
+    home: Path | None = None,
+    hpr_path: str = "hyperresearch",
+    profile: str = "full",
+) -> list[str]:
     """Install Claude Code skills + agents globally under ~/.claude/.
 
     Unlike `install_hooks`, this skips:
@@ -3016,6 +3570,8 @@ def install_global_hooks(home: Path | None = None, hpr_path: str = "hyperresearc
     if home is None:
         home = Path.home()
 
+    # Global installs have no vault config — built-in profiles only.
+    _set_render_state(profile, None)
     actions = []
 
     for installer in (
@@ -3034,6 +3590,8 @@ def install_global_hooks(home: Path | None = None, hpr_path: str = "hyperresearc
         lambda: _install_corpus_critic_agent(home, hpr_path),
         lambda: _install_draft_orchestrator_agent(home, hpr_path),
         lambda: _install_synthesizer_agent(home, hpr_path),
+        lambda: _install_browser_fetcher_agent(home, hpr_path),
+        lambda: _install_cite_checker_agent(home, hpr_path),
         lambda: _prune_retired_agents(home),
         lambda: _prune_global_step_skills(home),
     ):
@@ -3133,6 +3691,8 @@ def _write_agent_file(
     agents_dir.mkdir(parents=True, exist_ok=True)
     agent_path = agents_dir / filename
 
+    content = _render_installed(content)
+
     if agent_path.exists():
         existing = agent_path.read_text(encoding="utf-8")
         if existing == content:
@@ -3146,7 +3706,7 @@ def _install_researcher_agent(vault_root: Path, hpr_path: str) -> str | None:
     hpr_posix = hpr_path.replace("\\", "/")
     content = RESEARCHER_AGENT.format(hpr_path=hpr_posix)
     return _write_agent_file(
-        vault_root, "hyperresearch-fetcher.md", content, "sonnet fetcher (primary-source chasing)"
+        vault_root, "hyperresearch-fetcher.md", content, "fetcher (primary-source chasing)"
     )
 
 
@@ -3154,7 +3714,7 @@ def _install_loci_analyst_agent(vault_root: Path, hpr_path: str) -> str | None:
     hpr_posix = hpr_path.replace("\\", "/")
     content = LOCI_ANALYST_AGENT.format(hpr_path=hpr_posix)
     return _write_agent_file(
-        vault_root, "hyperresearch-loci-analyst.md", content, "sonnet loci analyst"
+        vault_root, "hyperresearch-loci-analyst.md", content, "loci analyst"
     )
 
 
@@ -3165,7 +3725,7 @@ def _install_source_analyst_agent(vault_root: Path, hpr_path: str) -> str | None
         vault_root,
         "hyperresearch-source-analyst.md",
         content,
-        "sonnet source analyst (1M context)",
+        "source analyst (full-source deep read)",
     )
 
 
@@ -3176,7 +3736,7 @@ def _install_depth_investigator_agent(vault_root: Path, hpr_path: str) -> str | 
         vault_root,
         "hyperresearch-depth-investigator.md",
         content,
-        "sonnet depth investigator",
+        "depth investigator",
     )
 
 
@@ -3187,7 +3747,7 @@ def _install_dialectic_critic_agent(vault_root: Path, hpr_path: str) -> str | No
         vault_root,
         "hyperresearch-dialectic-critic.md",
         content,
-        "opus dialectic critic",
+        "dialectic critic",
     )
 
 
@@ -3198,7 +3758,7 @@ def _install_depth_critic_agent(vault_root: Path, hpr_path: str) -> str | None:
         vault_root,
         "hyperresearch-depth-critic.md",
         content,
-        "opus depth critic",
+        "depth critic",
     )
 
 
@@ -3209,7 +3769,7 @@ def _install_width_critic_agent(vault_root: Path, hpr_path: str) -> str | None:
         vault_root,
         "hyperresearch-width-critic.md",
         content,
-        "opus width critic",
+        "width critic",
     )
 
 
@@ -3221,7 +3781,7 @@ def _install_instruction_critic_agent(vault_root: Path, hpr_path: str) -> str | 
         vault_root,
         "hyperresearch-instruction-critic.md",
         content,
-        "opus instruction critic",
+        "instruction critic",
     )
 
 
@@ -3229,7 +3789,7 @@ def _install_patcher_agent(vault_root: Path, hpr_path: str) -> str | None:
     # Patcher prompt does not reference hpr_path, but format is harmless
     content = PATCHER_AGENT
     return _write_agent_file(
-        vault_root, "hyperresearch-patcher.md", content, "sonnet patcher (Read+Edit only)"
+        vault_root, "hyperresearch-patcher.md", content, "patcher (Read+Edit only)"
     )
 
 
@@ -3240,7 +3800,7 @@ def _install_synthesizer_agent(vault_root: Path, hpr_path: str) -> str | None:
         vault_root,
         "hyperresearch-synthesizer.md",
         content,
-        "opus synthesizer (Read+Write only, two-pass)",
+        "synthesizer (Read+Write only, two-pass)",
     )
 
 
@@ -3252,7 +3812,7 @@ def _install_polish_auditor_agent(vault_root: Path, hpr_path: str) -> str | None
         vault_root,
         "hyperresearch-polish-auditor.md",
         content,
-        "sonnet polish auditor (Read+Edit only)",
+        "polish auditor (Read+Edit only)",
     )
 
 
@@ -3278,7 +3838,29 @@ def _install_readability_reformatter_agent(vault_root: Path, hpr_path: str) -> s
         vault_root,
         "hyperresearch-readability-recommender.md",
         content,
-        "opus readability recommender (Read+Write — writes JSON recommendations only)",
+        "readability recommender (Read+Write — writes JSON recommendations only)",
+    )
+
+
+def _install_cite_checker_agent(vault_root: Path, hpr_path: str) -> str | None:
+    hpr_posix = hpr_path.replace("\\", "/")
+    content = CITE_CHECKER_AGENT.replace("{hpr_path}", hpr_posix)
+    return _write_agent_file(
+        vault_root,
+        "hyperresearch-cite-checker.md",
+        content,
+        "cite-checker (step 14.5 — citation-sentence binding verification)",
+    )
+
+
+def _install_browser_fetcher_agent(vault_root: Path, hpr_path: str) -> str | None:
+    hpr_posix = hpr_path.replace("\\", "/")
+    content = BROWSER_FETCHER_AGENT.replace("{hpr_path}", hpr_posix)
+    return _write_agent_file(
+        vault_root,
+        "hyperresearch-browser-fetcher.md",
+        content,
+        "browser-lane fetcher (Chrome escalation queue; needs_human boundary)",
     )
 
 
@@ -3288,7 +3870,7 @@ def _install_corpus_critic_agent(vault_root: Path, hpr_path: str) -> str | None:
         vault_root,
         "hyperresearch-corpus-critic.md",
         content,
-        "sonnet corpus critic (Layer 3.7)",
+        "corpus critic (Layer 3.7)",
     )
 
 
@@ -3299,7 +3881,7 @@ def _install_draft_orchestrator_agent(vault_root: Path, hpr_path: str) -> str | 
         vault_root,
         "hyperresearch-draft-orchestrator.md",
         content,
-        "opus draft sub-orchestrator (Layer 4)",
+        "draft sub-orchestrator (Layer 4)",
     )
 
 
@@ -3404,6 +3986,7 @@ def _install_hyperresearch_skill(vault_root: Path) -> str | None:
     content = _read_skill_source("hyperresearch.md")
     if content is None:
         return None
+    content = _render_installed(content)
 
     skill_dir = vault_root / ".claude" / "skills" / "hyperresearch"
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -3416,6 +3999,7 @@ def _install_hyperresearch_skill(vault_root: Path) -> str | None:
 
 _HYPERRESEARCH_STEP_SKILLS = [
     "hyperresearch-1-decompose",
+    "hyperresearch-1-5-chapter-partition",
     "hyperresearch-2-width-sweep",
     "hyperresearch-3-contradiction-graph",
     "hyperresearch-4-loci-analysis",
@@ -3429,6 +4013,7 @@ _HYPERRESEARCH_STEP_SKILLS = [
     "hyperresearch-12-critics",
     "hyperresearch-13-gap-fetch",
     "hyperresearch-14-patcher",
+    "hyperresearch-14-5-cite-check",
     "hyperresearch-15-polish",
     "hyperresearch-16-readability-audit",
 ]
@@ -3459,6 +4044,7 @@ def _install_hyperresearch_step_skills(vault_root: Path) -> str | None:
         content = _read_skill_source(src_name)
         if content is None:
             continue
+        content = _render_installed(content)
 
         skill_dir = skills_root / skill_name
         skill_dir.mkdir(parents=True, exist_ok=True)

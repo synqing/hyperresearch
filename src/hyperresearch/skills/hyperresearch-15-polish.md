@@ -22,7 +22,7 @@ description: >
 
 Read these inputs:
 - `research/notes/final_report_<vault_tag>.md` — the patched draft from step 14 (or single-pass draft for light tier)
-- `research/query-<vault_tag>.md` — canonical research query
+- `research/runs/<vault_tag>/query.md` — canonical research query
 
 ---
 
@@ -31,7 +31,7 @@ Read these inputs:
 The polish auditor has `[Read, Edit]` only and cannot create a new file (same tool-lock rule as the step 14 patcher). Stub it first:
 
 ```bash
-echo '{"applied": [], "escalations": []}' > research/polish-log.json
+echo '{"applied": [], "escalations": []}' > research/runs/<vault_tag>/polish-log.json
 ```
 
 ---
@@ -45,9 +45,9 @@ Spawn ONCE.
 subagent_type: hyperresearch-polish-auditor
 prompt: |
   RESEARCH QUERY (verbatim, gospel):
-  > {{paste research/query-<vault_tag>.md body}}
+  > {{paste research/runs/<vault_tag>/query.md body}}
 
-  QUERY FILE: research/query-<vault_tag>.md
+  QUERY FILE: research/runs/<vault_tag>/query.md
 
   PIPELINE POSITION: You are step 15 (polish auditor) of the
   hyperresearch V8 pipeline — the final step. Step 14 (patcher) applied
@@ -57,7 +57,9 @@ prompt: |
 
   YOUR INPUTS:
   - draft_path: research/notes/final_report_<vault_tag>.md
-  - polish_log_path: research/polish-log.json   (already stubbed)
+  - polish_log_path: research/runs/<vault_tag>/polish-log.json   (already stubbed)
+
+  RUN DIRECTIVES: append the FULL contents of research/runs/<vault_tag>/shims/polish.md here, verbatim.
 ```
 
 The polish auditor strips:
@@ -85,16 +87,16 @@ If the escalation names a structural issue (e.g., "user asked for a ranked list;
 
 Before declaring the run complete, verify every expected pipeline artifact exists. **The required set depends on the tier:**
 
-- **light tier:** only `research/polish-log.json` is required (steps 12–14 are skipped, so no critic findings or patch log).
+- **light tier:** only `research/runs/<vault_tag>/polish-log.json` is required (steps 12–14 are skipped, so no critic findings or patch log).
 - **full tier:** require all four critic findings + patch-log + polish-log:
 
 ```bash
-for f in research/critic-findings-dialectic.json \
-         research/critic-findings-depth.json \
-         research/critic-findings-width.json \
-         research/critic-findings-instruction.json \
-         research/patch-log.json \
-         research/polish-log.json; do
+for f in research/runs/<vault_tag>/critic-findings-dialectic.json \
+         research/runs/<vault_tag>/critic-findings-depth.json \
+         research/runs/<vault_tag>/critic-findings-width.json \
+         research/runs/<vault_tag>/critic-findings-instruction.json \
+         research/runs/<vault_tag>/patch-log.json \
+         research/runs/<vault_tag>/polish-log.json; do
   test -f "$f" || echo "MISSING: $f"
 done
 ```
@@ -105,7 +107,7 @@ If any artifact is missing, the responsible step failed silently. Re-spawn the r
 
 ## Step 15.5 — Record the run + lint gate
 
-1. **Record the run.** Append to `research/audit_findings.json`:
+1. **Record the run.** Append to `research/runs/<vault_tag>/audit_findings.json`:
    ```json
    {
      "mode": "hyperresearch-v8",
@@ -132,6 +134,8 @@ If any artifact is missing, the responsible step failed silently. Re-spawn the r
    - `scaffold-prompt`: scaffold's User Prompt section doesn't match the query file exactly — fix the scaffold
    - `patch-surgery`: draft churn from step 11 → final exceeds the safety threshold — read the patch log and investigate
 
+   These four rules are pre-checks. The BINDING gate is `$HPR run finish <vault_tag>` in the router's final phase — it re-runs the battery (including quote-integrity and retracted-citations) and refuses to mark the run done while any check fails. Gate errors are facts about the report, not opinions to assess: never classify a gate error as a false positive. In particular, quotation marks are reserved for verbatim source text — the fix for a flagged rhetorical/framing quote is removing its quotation marks, not a memo explaining why it's fine.
+
 ---
 
 ## Step 15.6 — Ship
@@ -142,7 +146,7 @@ The final report lives at `research/notes/final_report_<vault_tag>.md`. The wrap
 
 ## Exit criterion
 
-- `research/polish-log.json` populated
+- `research/runs/<vault_tag>/polish-log.json` populated
 - Final integrity gate passed (or stub-filled with documented failure)
 - Lint gate passed
 - `research/notes/final_report_<vault_tag>.md` is the final, shippable artifact
