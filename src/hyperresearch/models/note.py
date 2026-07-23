@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -53,20 +54,31 @@ class ContentType(StrEnum):
 
 
 def slugify(text: str) -> str:
-    """Convert text to a URL-friendly slug. Preserves underscores."""
-    text = text.lower().strip()
-    text = re.sub(r"[^\w\s-]", "", text, flags=re.ASCII)
+    """Convert text to a URL-friendly slug. Preserves underscores.
+
+    Unicode-aware: CJK, Cyrillic, Arabic, and accented Latin characters are kept.
+    Stripping them (the old `flags=re.ASCII` behaviour) collapsed every non-Latin
+    title to whatever ASCII it happened to contain — so `バックライト - Wikipedia`
+    became `wikipedia`, and a vault of Japanese sources degenerated into
+    `wikipedia`, `wikipedia-2`, `wikipedia-3`, with meaningless [[wikilink]] ids.
+    """
+    # NFC-normalise so visually identical titles always yield the same slug.
+    text = unicodedata.normalize("NFC", text).lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)  # Unicode-aware \w — no re.ASCII
     text = re.sub(r"\s+", "-", text)
     text = re.sub(r"-+", "-", text)
     result = text.strip("-")
     if not result:
-        # Fallback for titles with only special/non-ASCII characters
+        # Fallback for titles with only punctuation/symbols
         import hashlib
         result = "note-" + hashlib.sha256(text.encode()).hexdigest()[:8]
-    # Truncate to avoid Windows MAX_PATH issues (keep well under 260 chars total)
+    # Cap length twice: characters (Windows MAX_PATH) and UTF-8 bytes, since most
+    # filesystems limit a filename to 255 *bytes* and one CJK character costs 3.
     if len(result) > 80:
-        result = result[:80].rstrip("-")
-    return result
+        result = result[:80]
+    if len(result.encode("utf-8")) > 200:
+        result = result.encode("utf-8")[:200].decode("utf-8", errors="ignore")
+    return result.rstrip("-")
 
 
 class NoteMeta(BaseModel):
@@ -92,6 +104,14 @@ class NoteMeta(BaseModel):
     expires: datetime | None = None      # Auto-stale after this date
     summary: str | None = None
     raw_file: str | None = None          # Relative path to raw artifact (e.g. raw/<id>.pdf)
+    # Source-ranking fields (frontmatter-mirrored; markdown stays truth).
+    # Derived scores (authority/centrality/independence/quality) are DB-cache
+    # only and deliberately NOT in frontmatter — they are recomputed.
+    doi: str | None = None               # DOI or arXiv id (e.g. 10.1234/x, arXiv:2501.01234)
+    utility_score: float | None = None   # Step-2 fetch-selection composite (0-18)
+    citation_count: int | None = None    # External citation count (OpenAlex/S2)
+    venue: str | None = None             # Publication venue, when known
+    is_retracted: bool | None = None     # None = unchecked; set by `hpr sources score`
 
     @field_validator("tags", mode="before")
     @classmethod
